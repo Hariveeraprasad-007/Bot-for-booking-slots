@@ -61,14 +61,18 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
         driver.implicitly_wait(2)
 
         # Login
+        print("Navigating to login page")
         driver.get("https://lms2.ai.saveetha.in/course/view.php?id=302")
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.NAME, 'username'))).send_keys(username_input)
         driver.find_element(By.NAME, 'password').send_keys(password_input)
         driver.find_element(By.ID, 'loginbtn').click()
+        print("Logged in successfully")
 
         # Direct navigation to scheduler
+        print("Navigating to scheduler")
         driver.get(scheduler_url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
+        print("Scheduler page loaded")
 
         # Slot finding with retry mechanism
         found_slot = False
@@ -148,12 +152,15 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                                     except ElementClickInterceptedException:
                                         print("Click intercepted for book button, forcing with JavaScript")
                                         driver.execute_script("arguments[0].click();", book_button)
+                                    print("Clicked book button")
 
                                     # Fill note and submit
                                     note_field = WebDriverWait(driver, 5).until(
                                         EC.visibility_of_element_located((By.ID, "id_studentnote_editoreditable"))
                                     )
+                                    print("Found note field")
                                     note_field.send_keys("Booking for project work")
+                                    print("Filled note field")
                                     submit_button = WebDriverWait(driver, 5).until(
                                         EC.element_to_be_clickable((By.ID, "id_submitbutton"))
                                     )
@@ -162,10 +169,16 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                                     except ElementClickInterceptedException:
                                         print("Click intercepted for submit button, forcing with JavaScript")
                                         driver.execute_script("arguments[0].click();", submit_button)
+                                    print("Clicked submit button")
 
-                                    # Navigate back to scheduler to verify booking
+                                    # Navigate back to scheduler to verify booking (optional)
+                                    print("Navigating back to scheduler for verification")
                                     driver.get(scheduler_url)
-                                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
+                                    try:
+                                        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
+                                        print("Scheduler table loaded for verification")
+                                    except TimeoutException as e:
+                                        print(f"Verification timed out, but booking may still be successful: {e}")
 
                                     # Re-find the row to check booking status
                                     all_rows = WebDriverWait(driver, 5).until(
@@ -227,16 +240,16 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
 
     except TimeoutException as e:
         print(f"Timeout error: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Timeout error: {e}"))
+        root.after(0, lambda e=e: messagebox.showerror("Error", f"❌ Timeout error: {e}"))
     except NoSuchElementException as e:
         print(f"Element not found: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Element not found: {e}"))
+        root.after(0, lambda e=e: messagebox.showerror("Error", f"❌ Element not found: {e}"))
     except Exception as e:
         print(f"Unexpected error: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Unexpected error: {e}"))
+        root.after(0, lambda e=e: messagebox.showerror("Error", f"❌ Unexpected error: {e}"))
     finally:
         if driver:
-            print("Closing browser.")
+            print("Closing browser gracefully")
             driver.quit()
 
 def add_slot():
