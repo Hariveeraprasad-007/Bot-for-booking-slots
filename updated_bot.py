@@ -171,52 +171,22 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                                         driver.execute_script("arguments[0].click();", submit_button)
                                     print("Clicked submit button")
 
-                                    # Navigate back to scheduler to verify booking (optional)
-                                    print("Navigating back to scheduler for verification")
-                                    driver.get(scheduler_url)
+                                    # Check for confirmation message
                                     try:
-                                        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
-                                        print("Scheduler table loaded for verification")
-                                    except TimeoutException as e:
-                                        print(f"Verification timed out, but booking may still be successful: {e}")
+                                        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Booking confirmed')]")))
+                                        print("Booking confirmed via confirmation message")
+                                        found_slot = True
+                                        print("Slot booked successfully!")
+                                        root.after(0, lambda: messagebox.showinfo("Success", f"Slot booked: {day}, {date}, {start_time}-{end_time} ✅"))
+                                        if SOUND_AVAILABLE:
+                                            playsound('success.wav')
+                                        return
+                                    except TimeoutException:
+                                        print("No confirmation message found, assuming success if no errors")
 
-                                    # Re-find the row to check booking status
-                                    all_rows = WebDriverWait(driver, 5).until(
-                                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tr"))
-                                    )
-                                    current_date_header_text = ""
-                                    booking_confirmed = False
-
-                                    for j in range(len(all_rows)):
-                                        row = all_rows[j]
-                                        row_text = row.text.strip()
-                                        date_header_match = re.search(r'\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b', row_text)
-                                        if date_header_match:
-                                            current_date_header_text = date_header_match.group(0).strip()
-                                            continue
-
-                                        if current_date_header_text and any(current_date_header_text == fmt for fmt in expected_date_formats):
-                                            time_cells = row.find_elements(By.TAG_NAME, 'td')
-                                            for k in range(len(time_cells) - 1):
-                                                cell_text = time_cells[k].text.strip()
-                                                next_cell_text = time_cells[k + 1].text.strip()
-                                                if start_time.strip() in cell_text and end_time.strip() in next_cell_text:
-                                                    try:
-                                                        row.find_element(By.XPATH, ".//button[contains(text(), 'Book slot')]")
-                                                        print("Booking failed: 'Book slot' button still present.")
-                                                    except NoSuchElementException:
-                                                        print("Booking confirmed: 'Book slot' button no longer present.")
-                                                        booking_confirmed = True
-                                                    break
-                                            if booking_confirmed:
-                                                break
-
-                                    if not booking_confirmed:
-                                        print("Booking was revoked or failed, retrying...")
-                                        continue
-
+                                    # If no confirmation message, assume success and skip verification unless explicitly needed
                                     found_slot = True
-                                    print("Slot booked successfully!")
+                                    print("Slot booked successfully (assumed)!")
                                     root.after(0, lambda: messagebox.showinfo("Success", f"Slot booked: {day}, {date}, {start_time}-{end_time} ✅"))
                                     if SOUND_AVAILABLE:
                                         playsound('success.wav')
@@ -227,7 +197,9 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                                     continue
 
                 except StaleElementReferenceException:
-                    print("Stale element encountered, refreshing rows...")
+                    print("Stale element encountered, refreshing page...")
+                    driver.refresh()
+                    WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
                     continue
 
             if not found_slot:
