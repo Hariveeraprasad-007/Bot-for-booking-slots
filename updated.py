@@ -19,15 +19,43 @@ try:
     SOUND_AVAILABLE = True
 except ImportError:
     SOUND_AVAILABLE = False
+try:
+    import GPUtil
+    GPU_AVAILABLE = True
+except ImportError:
+    GPU_AVAILABLE = False
 
-# Global list to hold slot details and active threads
+# Global lists to hold slot details, active threads, and drivers
 slot_list = []
 active_threads = []
-active_drivers = []  # Track active Selenium drivers
+active_drivers = []
+scheduled_time = None  # Store the scheduled time for validation
+
+def check_gpu_availability():
+    """Check if a GPU is available and return appropriate browser options."""
+    if GPU_AVAILABLE:
+        try:
+            gpus = GPUtil.getGPUs()
+            if gpus and any(gpu.load < 0.9 for gpu in gpus):  # Check if GPU is not fully utilized
+                print("GPU detected and available.")
+                return True, "--enable-gpu"
+            else:
+                print("No available GPU or GPU fully utilized. Falling back to CPU.")
+                return False, "--disable-gpu"
+        except Exception as e:
+            print(f"Error checking GPU: {e}. Falling back to CPU.")
+            return False, "--disable-gpu"
+    else:
+        print("GPUtil not installed. Falling back to CPU.")
+        return False, "--disable-gpu"
 
 def slot_booking_process(username_input, password_input, day, date, start_time, end_time, scheduler_url, proxy, headless, browser_choice, root, continuous=False):
     driver = None
     try:
+        # Check GPU availability
+        use_gpu, gpu_arg = check_gpu_availability()
+        root.after(0, lambda: status_label.config(text=f"Using {'GPU' if use_gpu else 'CPU'}"))
+
         # Set up browser options based on user selection
         if browser_choice == "Chrome":
             options = ChromeOptions()
@@ -35,7 +63,7 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                 options.add_argument("--headless=new")
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
-                options.add_argument("--enable-gpu")
+            options.add_argument(gpu_arg)  # GPU or CPU setting
             if proxy:
                 options.add_argument(f'--proxy-server={proxy}')
             options.add_argument("--page-load-strategy=eager")
@@ -63,7 +91,7 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
         active_drivers.append(driver)
 
         driver.maximize_window()
-        print(f"Running in {browser_choice} {'headless' if headless else 'visible'} mode")
+        print(f"Running in {browser_choice} {'headless' if headless else 'visible'} mode with {'GPU' if use_gpu else 'CPU'}")
         driver.implicitly_wait(1)
 
         # Login
@@ -80,7 +108,7 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
             formatted_date = date_obj.strftime("%d %B %Y")
         except ValueError:
             print(f"Invalid date format: {date}")
-            root.after(0, lambda: messagebox.showerror("Error", f"❌ Invalid date format"))
+            root.after(0, lambda: messagebox.showerror("Error", f"❌ Invalid date format: {date}"))
             return
 
         # Try different date formats to match LMS
@@ -200,17 +228,18 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
 
     except TimeoutException as e:
         print(f"Timeout error: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Timeout error: {e}"))
+        root.after(0, lambda: messagebox.showerror("Error", f"❌ Timeout error"))
     except NoSuchElementException as e:
         print(f"Element not found: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Element not found: {e}"))
+        root.after(0, lambda: messagebox.showerror("Error", f"❌ Element not found"))
     except Exception as e:
         print(f"Unexpected error: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Unexpected error: {e}"))
+        root.after(0, lambda: messagebox.showerror("Error", f"❌ Unexpected error"))
     finally:
         if driver:
             print("Closing browser gracefully")
-            active_drivers.remove(driver)  # Remove from tracking
+            if driver in active_drivers:
+                active_drivers.remove(driver)
             driver.quit()
 
 def add_slot():
@@ -245,10 +274,12 @@ def remove_slot():
 def stop_process():
     # Clear all scheduled jobs
     schedule.clear()
+    global scheduled_time
+    scheduled_time = None
     print("All scheduled jobs cleared.")
 
     # Stop all active threads and drivers
-    for driver in active_drivers[:]:  # Iterate over a copy to avoid modification issues
+    for driver in active_drivers[:]:
         try:
             driver.quit()
             active_drivers.remove(driver)
@@ -258,15 +289,26 @@ def stop_process():
 
     for thread in active_threads[:]:
         try:
-            # Threads can't be forcefully stopped in Python, but we remove them from tracking
             active_threads.remove(thread)
             print("Removed a tracked thread.")
         except Exception as e:
             print(f"Error removing thread: {e}")
 
     messagebox.showinfo("Stopped", "All booking processes and schedules have been stopped.")
+    status_label.config(text="Status: Stopped")
 
 def run_booking(continuous=False):
+    global scheduled_time
+    # If scheduled, validate the current time
+    if scheduled_time:
+        now = datetime.now()
+        scheduled = datetime.strptime(scheduled_time, "%H:%M")
+        scheduled_today = now.replace(hour=scheduled.hour, minute=scheduled.minute, second=0, microsecond=0)
+        time_diff = abs((now - scheduled_today).total_seconds())
+        if time_diff > 60:  # Allow 1-minute window
+            print(f"Booking attempt ignored: Current time {now.strftime('%H:%M:%S')} is not within 1 minute of scheduled time {scheduled_time}")
+            return
+
     username = entry_username.get()
     password = entry_password.get()
     choice = combo_schedule.get()
@@ -297,20 +339,24 @@ def run_booking(continuous=False):
             username, password, slot["day"], slot["date"], slot["start_time"], slot["end_time"],
             scheduler_url, proxy, headless_mode, browser_choice, root, continuous
         ))
-        active_threads.append(thread)  # Track the thread
+        active_threads.append(thread)
         thread.start()
 
 def schedule_booking():
+    global scheduled_time
     schedule_time = entry_schedule_time.get()
     try:
         # Validate time format (e.g., "21:03")
         datetime.strptime(schedule_time, "%H:%M")
-        # Clear all previous scheduled jobs to prevent duplicates
+        # Clear all previous scheduled jobs
         schedule.clear()
+        # Store the scheduled time
+        scheduled_time = schedule_time
         # Schedule the booking
         schedule.every().day.at(schedule_time).do(lambda: run_booking(continuous=True))
         print(f"Scheduled booking daily at {schedule_time}")
         messagebox.showinfo("Scheduled", f"Booking scheduled daily at {schedule_time}. Next run: {schedule.next_run().strftime('%Y-%m-%d %H:%M:%S')}.")
+        status_label.config(text=f"Status: Scheduled at {schedule_time}")
 
         # Start schedule loop in a separate thread
         def run_schedule():
@@ -329,7 +375,7 @@ def schedule_booking():
 # --- GUI Layout ---
 root = tk.Tk()
 root.title("Enhanced Slot Booking Bot - Saveetha LMS")
-root.geometry("500x850")  # Increased height for new button
+root.geometry("500x900")  # Increased height for status label
 
 ttk.Label(root, text="Username").pack(pady=5)
 entry_username = ttk.Entry(root, width=30)
@@ -391,6 +437,9 @@ scrollbar.pack(side="right", fill="y")
 headless_var = tk.BooleanVar()
 check_headless = ttk.Checkbutton(root, text="Run Headless (Continuous Refresh)", variable=headless_var)
 check_headless.pack(pady=10)
+
+status_label = ttk.Label(root, text="Status: Idle")
+status_label.pack(pady=5)
 
 button_book = ttk.Button(root, text="Book Slots Now", command=lambda: run_booking(continuous=False))
 button_book.pack(pady=10)
