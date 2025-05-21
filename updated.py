@@ -11,7 +11,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import StaleElementReferenceException, NoSuchElementException, TimeoutException, ElementClickInterceptedException
 import threading
 import re
-import time
 from datetime import datetime, timedelta
 import schedule
 try:
@@ -49,68 +48,111 @@ def check_gpu_availability():
         print("GPUtil not installed. Falling back to CPU.")
         return False, "--disable-gpu"
 
-def check_existing_booking(driver):
-    """Check if the user has upcoming bookings and return their date and time details."""
+def parse_slot_date(date_str):
+    """Parse the date string from datelabel and return a datetime object."""
     try:
-        print("Waiting for page to load fully...")
-        time.sleep(2)
-        
+        date_part = date_str.split(", ")[1]  # "22 May 2025"
+        return datetime.strptime(date_part, "%d %B %Y")
+    except (ValueError, IndexError) as e:
+        print(f"Error parsing date '{date_str}': {e}")
+        return None
+
+def check_existing_booking(driver, scheduler_url):
+    """Check for upcoming and freezed slots, returning both lists separately."""
+    driver.get(scheduler_url)
+    current_date = datetime.now()
+    upcoming_slots = []
+    freezed_slots = []
+    try:
         print("Looking for 'Upcoming slots' section...")
-        upcoming_header = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Upcoming slots')]"))
-        )
-        print("'Upcoming slots' section found.")
+        try:
+            upcoming_header = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Upcoming slots')]"))
+            )
+            print("'Upcoming slots' section found.")
+            upcoming_table = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Upcoming slots')]/following::table[contains(@class, 'generaltable')]"))
+            )
+            print("Upcoming slots table located.")
+            rows = upcoming_table.find_elements(By.TAG_NAME, "tr")[1:]
+            for row in rows:
+                try:
+                    date_div = row.find_element(By.CLASS_NAME, "datelabel")
+                    time_div = row.find_element(By.CLASS_NAME, "timelabel")
+                    date_str = date_div.text.strip()
+                    slot_date = parse_slot_date(date_str)
+                    if slot_date:
+                        if slot_date.date() >= current_date.date():
+                            date_time = f"{date_str} {time_div.text.strip()}"
+                            upcoming_slots.append(date_time)
+                        else:
+                            print(f"Skipping past slot in Upcoming section: {date_str}")
+                    else:
+                        print(f"Could not parse date for slot: {date_str}")
+                except Exception as e:
+                    print(f"Error extracting date/time from upcoming slot row: {e}")
+                    continue
+        except TimeoutException:
+            print("No 'Upcoming slots' section found within timeout.")
 
-        upcoming_table = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Upcoming slots')]/following::table[contains(@class, 'generaltable')]"))
-        )
-        print("Upcoming slots table located.")
+        print("Looking for 'Freezed slots', 'Past slots', or related sections...")
+        try:
+            freezed_header = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Freezed slots') or contains(text(), 'Past slots') or contains(text(), 'Missed slots') or contains(text(), 'Expired slots') or contains(text(), 'Completed slots')]"))
+            )
+            print("'Freezed slots' section found.")
+            freezed_table = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Freezed slots') or contains(text(), 'Past slots') or contains(text(), 'Missed slots') or contains(text(), 'Expired slots') or contains(text(), 'Completed slots')]/following::table[contains(@class, 'generaltable')]"))
+            )
+            print("Freezed slots table located.")
+            rows = freezed_table.find_elements(By.TAG_NAME, "tr")[1:]
+            for row in rows:
+                try:
+                    date_div = row.find_element(By.CLASS_NAME, "datelabel")
+                    time_div = row.find_element(By.CLASS_NAME, "timelabel")
+                    date_str = date_div.text.strip()
+                    slot_date = parse_slot_date(date_str)
+                    if slot_date:
+                        if slot_date.date() < current_date.date():
+                            date_time = f"{date_str} {time_div.text.strip()}"
+                            freezed_slots.append(date_time)
+                        else:
+                            print(f"Skipping future slot in freezed section: {date_str}")
+                    else:
+                        print(f"Could not parse date for freezed slot: {date_str}")
+                except Exception as e:
+                    print(f"Error extracting date/time from freezed slot row: {e}")
+                    continue
+        except TimeoutException:
+            print("No 'Freezed slots', 'Past slots', or related section found within timeout.")
 
-        rows = upcoming_table.find_elements(By.TAG_NAME, "tr")[1:]  # Skip header row
-        booked_slots = []
-
-        if not rows:
-            print("No upcoming slots found in the table.")
-            cancel_button = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel booking')]")
-            if cancel_button:
-                print("Cancel booking button found, but no slot details available.")
-                return True, ["Upcoming slot exists, but details could not be retrieved"]
-            return False, []
-
-        print(f"Found {len(rows)} upcoming slots.")
-        for row in rows:
-            try:
-                date_div = row.find_element(By.CLASS_NAME, "datelabel")
-                time_div = row.find_element(By.CLASS_NAME, "timelabel")
-                date_time = f"{date_div.text.strip()} {time_div.text.strip()}"
-                booked_slots.append(date_time)
-            except Exception as e:
-                print(f"Error extracting date/time from row: {e}")
-                continue
-
+        print("Checking for 'Cancel booking' button as fallback...")
         cancel_button = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel booking')]")
-        has_booking = bool(cancel_button and booked_slots)
-        return has_booking, booked_slots if booked_slots else ["Unknown slot"]
-    except TimeoutException as e:
-        print(f"Timeout while looking for 'Upcoming slots' section or table: {e}")
-        cancel_button = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel booking')]")
-        if cancel_button:
-            print("Cancel booking button found, but no slot details available due to timeout.")
-            return True, ["Upcoming slot exists, but details could not be retrieved due to timeout"]
-        return False, []
+        has_upcoming_booking = bool(cancel_button)
+
+        all_slots = upcoming_slots + freezed_slots
+        if freezed_slots:
+            print(f"Found freezed slots: {freezed_slots}")
+        if upcoming_slots:
+            print(f"Found upcoming slots: {upcoming_slots}")
+        if not all_slots and has_upcoming_booking:
+            print("Cancel booking button found, but no slot details extracted.")
+            all_slots = ["Upcoming slot exists, but details could not be retrieved"]
+
+        return has_upcoming_booking, all_slots if all_slots else ["No slots found"], freezed_slots
     except Exception as e:
         print(f"Unexpected error while checking existing bookings: {e}")
         cancel_button = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel booking')]")
-        if cancel_button:
-            print("Cancel booking button found, but no slot details available due to unexpected error.")
-            return True, ["Upcoming slot exists, but details could not be retrieved due to error"]
-        return False, []
+        has_upcoming_booking = bool(cancel_button)
+        return has_upcoming_booking, ["Error retrieving slot details"] if has_upcoming_booking else ["No slots found"], freezed_slots
 
-def slot_booking_process(username_input, password_input, slots, scheduler_url, proxy, headless, browser_choice, root, continuous=False, check_until_time=None):
+def slot_booking_process(username_input, password_input, venue_slots, proxy, headless, browser_choice, root, continuous=False, check_until_time=None):
     driver = None
+    booked_slots = []
+    failed_slots = []
     try:
         use_gpu, gpu_arg = check_gpu_availability()
-        root.after(0, lambda: status_label.config(text=f"Using {'GPU' if use_gpu else 'CPU'} | Checking for slots..."))
+        root.after(0, lambda: status_label.config(text=f"Using {'GPU' if use_gpu else 'CPU'} | Booking slots..."))
 
         deadline = None
         if check_until_time:
@@ -158,120 +200,157 @@ def slot_booking_process(username_input, password_input, slots, scheduler_url, p
         active_drivers.append(driver)
         driver.maximize_window()
         print(f"Running in {browser_choice} {'headless' if headless else 'visible'} mode with {'GPU' if use_gpu else 'CPU'}")
-        driver.implicitly_wait(1)
+        driver.implicitly_wait(0.5)
 
         print("Navigating to login page")
         driver.get("https://lms2.ai.saveetha.in/course/view.php?id=302")
-        WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.NAME, 'username'))).send_keys(username_input)
+        WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.NAME, 'username'))).send_keys(username_input)
         driver.find_element(By.NAME, 'password').send_keys(password_input)
         driver.find_element(By.ID, 'loginbtn').click()
         print("Logged in successfully")
 
-        driver.get(scheduler_url)
-        has_booking, booked_slots = check_existing_booking(driver)
-        if has_booking:
-            print(f"User already has upcoming bookings: {booked_slots}")
-            root.after(0, lambda: messagebox.showerror("Error", f"Upcoming slot already exists for user: {', '.join(booked_slots)}"))
-            return
+        urls = {
+            "1731": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36638",
+            "1851": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36298",
+            "1852": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=37641",
+            "1611": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36137"
+        }
 
-        found_slot = False
-        attempt = 0
-        refresh_interval = 1
-        max_retries_503 = 5
-
-        while not found_slot:
-            attempt += 1
-            print(f"Attempt {attempt} to find and book slots")
-
-            if deadline and datetime.now() > deadline:
-                print(f"Deadline {deadline.strftime('%H:%M:%S')} reached. Slots not found.")
-                root.after(0, lambda: messagebox.showerror("Failure", f"❌ Slots not found by {check_until_time}."))
-                return
-
-            for retry in range(max_retries_503):
-                try:
-                    driver.get(scheduler_url)
-                    WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
-                    break
-                except TimeoutException:
-                    page_source = driver.page_source
-                    if "503 Service Temporarily Unavailable" in page_source:
-                        print(f"503 Error detected, retrying ({retry + 1}/{max_retries_503})...")
-                        time.sleep(2)
-                        if retry == max_retries_503 - 1:
-                            print("Max retries for 503 error reached.")
-                            root.after(0, lambda: messagebox.showerror("Error", "❌ 503 Service Unavailable - Max retries reached"))
-                            return
-                    else:
-                        raise
-
-            print("Scheduler page loaded")
-            all_rows = WebDriverWait(driver, 3).until(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tr"))
-            )
-            current_date_header_text = ""
-
-            for slot in slots:
-                day, date, start_time, end_time = slot["day"], slot["date"], slot["start_time"], slot["end_time"]
-                try:
-                    date_obj = datetime.strptime(date.strip(), "%d %m %Y")
-                    formatted_date = date_obj.strftime("%d %B %Y")
-                except ValueError:
-                    print(f"Invalid date format: {date}")
-                    root.after(0, lambda: messagebox.showerror("Error", f"❌ Invalid date format: {date}"))
+        for venue, slots in venue_slots.items():
+            try:
+                scheduler_url = urls[venue]
+                print(f"Checking for existing bookings at venue {venue}...")
+                has_booking, booked_slots_info, freezed_slots = check_existing_booking(driver, scheduler_url)
+                if has_booking:
+                    print(f"User already has upcoming bookings at venue {venue}: {booked_slots_info}")
+                    for slot in slots:
+                        slot_str = f"Venue: {venue}, Day: {slot['day']}, Date: {slot['date']}, Start: {slot['start_time']}, End: {slot['end_time']}"
+                        failed_slots.append(f"{slot_str} - Already booked: {', '.join(booked_slots_info)}")
                     continue
 
-                expected_date_formats = [
-                    formatted_date,
-                    date_obj.strftime("%B %d, %Y"),
-                    date_obj.strftime("%d/%m/%Y"),
-                    f"{day.strip()}, {formatted_date}"
-                ]
-                print(f"Looking for slot: {day}, {date}, {start_time}-{end_time}")
+                for slot in slots:
+                    day, date, start_time, end_time = slot["day"], slot["date"], slot["start_time"], slot["end_time"]
+                    slot_str = f"Venue: {venue}, Day: {day}, Date: {date}, Start: {start_time}, End: {end_time}"
+                    print(f"Attempting to book slot at venue {venue}: {day}, {date}, {start_time}-{end_time}")
 
-                for i in range(len(all_rows)):
+                    if deadline and datetime.now() > deadline:
+                        print(f"Deadline {deadline.strftime('%H:%M:%S')} reached. Slot not booked: {slot_str}")
+                        failed_slots.append(f"{slot_str} - Deadline reached")
+                        continue
+
+                    max_retries_503 = 3
+                    for retry in range(max_retries_503):
+                        try:
+                            print(f"Loading scheduler page for venue {venue} (attempt {retry + 1}/{max_retries_503})...")
+                            driver.get(scheduler_url)
+                            print("Page loaded successfully.")
+                            break
+                        except Exception as e:
+                            page_source = driver.page_source
+                            if "503 Service Temporarily Unavailable" in page_source:
+                                print(f"503 Error detected, retrying ({retry + 1}/{max_retries_503})...")
+                                if retry == max_retries_503 - 1:
+                                    print("Max retries for 503 error reached.")
+                                    failed_slots.append(f"{slot_str} - 503 Service Unavailable")
+                                    continue
+                            else:
+                                print(f"Unexpected error while loading page for venue {venue}: {e}")
+                                failed_slots.append(f"{slot_str} - Page load error: {str(e)}")
+                                continue
+
+                    all_rows = None
+                    max_retries_slot_table = 2
+                    for retry in range(max_retries_slot_table):
+                        try:
+                            print(f"Attempting to locate slot table for venue {venue} (attempt {retry + 1}/{max_retries_slot_table})...")
+                            all_rows = WebDriverWait(driver, 3).until(
+                                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tr"))
+                            )
+                            print(f"Scheduler page for venue {venue} loaded with {len(all_rows)} rows in slot table.")
+                            break
+                        except TimeoutException:
+                            print(f"Timeout while locating slot table for venue {venue}.")
+                            page_source = driver.page_source
+                            if "slotbookertable" not in page_source:
+                                print(f"Slot table not found in page source for venue {venue}.")
+                                freezed_indicators = ["Freezed slots", "Past slots", "Missed slots", "Expired slots", "Completed slots", "freezed", "past booking"]
+                                has_booking, _, freezed_slots = check_existing_booking(driver, scheduler_url)
+                                has_freezed_indicators = any(indicator in page_source.lower() for indicator in freezed_indicators)
+                                if freezed_slots or has_freezed_indicators:
+                                    print(f"Freezed slots or indicators detected for venue {venue}: {freezed_slots}")
+                                    failed_slots.append(f"{slot_str} - Slot time and date was freezed: {', '.join(freezed_slots) if freezed_slots else 'Past bookings detected'}")
+                                else:
+                                    print(f"No freezed slots or indicators found for venue {venue}. Assuming no slots are available.")
+                                    failed_slots.append(f"{slot_str} - No slots available")
+                                break
+                            if retry == max_retries_slot_table - 1:
+                                print(f"Max retries reached for locating slot table at venue {venue}.")
+                                failed_slots.append(f"{slot_str} - Slot table not found")
+                                break
+
+                    if not all_rows:
+                        continue
+
                     try:
-                        all_rows = WebDriverWait(driver, 3).until(
-                            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tr"))
-                        )
-                        row = all_rows[i]
-                        row_text = row.text.strip()
+                        date_obj = datetime.strptime(date.strip(), "%d %m %Y")
+                        formatted_date = date_obj.strftime("%d %B %Y")
+                    except ValueError:
+                        print(f"Invalid date format: {date}")
+                        failed_slots.append(f"{slot_str} - Invalid date format")
+                        continue
 
-                        date_header_match = re.search(r'\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b', row_text)
-                        if date_header_match:
-                            current_date_header_text = date_header_match.group(0).strip()
-                        else:
-                            for date_format in expected_date_formats:
-                                if date_format in row_text:
-                                    current_date_header_text = date_format
-                                    break
+                    expected_date_formats = [
+                        formatted_date,
+                        date_obj.strftime("%B %d, %Y"),
+                        date_obj.strftime("%d/%m/%Y"),
+                        f"{day.strip()}, {formatted_date}"
+                    ]
 
-                        if current_date_header_text and any(current_date_header_text == fmt for fmt in expected_date_formats):
-                            time_cells = row.find_elements(By.TAG_NAME, 'td')
-                            for k in range(len(time_cells) - 1):
-                                cell_text = time_cells[k].text.strip()
-                                next_cell_text = time_cells[k + 1].text.strip()
-                                if start_time.strip() in cell_text and end_time.strip() in next_cell_text:
-                                    print(f"Found matching slot: {cell_text} to {next_cell_text}")
-                                    try:
+                    current_date_header_text = ""
+                    booked = False
+                    for i in range(len(all_rows)):
+                        try:
+                            all_rows = WebDriverWait(driver, 2).until(
+                                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tr"))
+                            )
+                            row = all_rows[i]
+                            row_text = row.text.strip()
+
+                            date_header_match = re.search(r'\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b', row_text)
+                            if date_header_match:
+                                current_date_header_text = date_header_match.group(0).strip()
+                            else:
+                                for date_format in expected_date_formats:
+                                    if date_format in row_text:
+                                        current_date_header_text = date_format
+                                        break
+
+                            if current_date_header_text and any(current_date_header_text == fmt for fmt in expected_date_formats):
+                                time_cells = row.find_elements(By.TAG_NAME, 'td')
+                                for k in range(len(time_cells) - 1):
+                                    cell_text = time_cells[k].text.strip()
+                                    next_cell_text = time_cells[k + 1].text.strip()
+                                    if start_time.strip() in cell_text and end_time.strip() in next_cell_text:
+                                        print(f"Found matching slot at venue {venue}: {cell_text} to {next_cell_text}")
                                         if "Booked" in row.text:
-                                            print("Slot already booked, skipping...")
-                                            root.after(0, lambda: messagebox.showerror("Failure", f"❌ Slot already booked for {day}, {date}, {start_time}-{end_time}."))
-                                            continue
+                                            print(f"Slot already booked at venue {venue}, skipping...")
+                                            failed_slots.append(f"{slot_str} - Already booked")
+                                            booked = True
+                                            break
 
                                         book_button = row.find_element(By.XPATH, ".//button[contains(text(), 'Book slot')]")
                                         driver.execute_script("arguments[0].scrollIntoView(true);", book_button)
-                                        WebDriverWait(driver, 3).until(EC.element_to_be_clickable(book_button))
+                                        WebDriverWait(driver, 2).until(EC.element_to_be_clickable(book_button))
                                         try:
                                             book_button.click()
                                         except ElementClickInterceptedException:
                                             driver.execute_script("arguments[0].click();", book_button)
 
-                                        note_field = WebDriverWait(driver, 3).until(
+                                        note_field = WebDriverWait(driver, 2).until(
                                             EC.visibility_of_element_located((By.ID, "id_studentnote_editoreditable"))
                                         )
                                         note_field.send_keys("Booking for project work")
-                                        submit_button = WebDriverWait(driver, 3).until(
+                                        submit_button = WebDriverWait(driver, 2).until(
                                             EC.element_to_be_clickable((By.ID, "id_submitbutton"))
                                         )
                                         try:
@@ -279,45 +358,49 @@ def slot_booking_process(username_input, password_input, slots, scheduler_url, p
                                         except ElementClickInterceptedException:
                                             driver.execute_script("arguments[0].click();", submit_button)
 
-                                        try:
-                                            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Booking confirmed')]")))
-                                            found_slot = True
-                                            print(f"Slot booked successfully: {day}, {date}, {start_time}-{end_time}")
-                                            root.after(0, lambda: messagebox.showinfo("Success", f"Slot booked: {day}, {date}, {start_time}-{end_time} ✅"))
-                                            if SOUND_AVAILABLE:
-                                                playsound('success.wav')
-                                            continue
-                                        except TimeoutException:
-                                            found_slot = True
-                                            print(f"Slot booked successfully (assumed): {day}, {date}, {start_time}-{end_time}")
-                                            root.after(0, lambda: messagebox.showinfo("Success", f"Slot booked: {day}, {date}, {start_time}-{end_time} ✅"))
-                                            if SOUND_AVAILABLE:
-                                                playsound('success.wav')
-                                            continue
+                                        has_booking, _, _ = check_existing_booking(driver, scheduler_url)
+                                        if has_booking:
+                                            print(f"Slot booked successfully at venue {venue}: {day}, {date}, {start_time}-{end_time}")
+                                            booked_slots.append(slot_str)
+                                            booked = True
+                                        else:
+                                            print(f"Booking failed for {slot_str}")
+                                            failed_slots.append(f"{slot_str} - Booking failed")
+                                        break
+                        except StaleElementReferenceException:
+                            print(f"Stale element encountered at venue {venue}, skipping slot...")
+                            failed_slots.append(f"{slot_str} - Stale element error")
+                            break
+                        except Exception as e:
+                            print(f"Error booking slot at venue {venue}: {e}")
+                            failed_slots.append(f"{slot_str} - Error: {str(e)}")
+                            break
 
-                                    except (NoSuchElementException, TimeoutException) as e:
-                                        print(f"Booking attempt failed for {day}, {date}, {start_time}-{end_time}: {e}. Retrying...")
-                                        continue
+                    if not booked:
+                        failed_slots.append(f"{slot_str} - Slot not found")
 
-                    except StaleElementReferenceException:
-                        print("Stale element encountered, refreshing...")
-                        driver.refresh()
-                        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
-                        break
+            except Exception as e:
+                print(f"Error processing venue {venue}: {e}")
+                for slot in slots:
+                    slot_str = f"Venue: {venue}, Day: {slot['day']}, Date: {slot['date']}, Start: {slot['start_time']}, End: {slot['end_time']}"
+                    failed_slots.append(f"{slot_str} - Venue processing error: {str(e)}")
 
-            if not found_slot:
-                print(f"Attempt {attempt} failed, retrying in {refresh_interval} seconds...")
-                time.sleep(refresh_interval)
+        summary_message = "Booking Summary:\n\n"
+        if booked_slots:
+            summary_message += "Booked Slots:\n" + "\n".join(booked_slots) + "\n\n"
+        else:
+            summary_message += "Booked Slots: None\n\n"
+        if failed_slots:
+            summary_message += "Failed Slots:\n" + "\n".join(failed_slots)
+        else:
+            summary_message += "Failed Slots: None"
+        root.after(0, lambda: messagebox.showinfo("Booking Summary", summary_message))
+        if booked_slots and SOUND_AVAILABLE:
+            playsound('success.wav')
 
-    except TimeoutException as e:
-        print(f"Timeout error: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Timeout error"))
-    except NoSuchElementException as e:
-        print(f"Element not found: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Element not found"))
     except Exception as e:
         print(f"Unexpected error: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Unexpected error"))
+        root.after(0, lambda: messagebox.showerror("Error", f"❌ Unexpected error: {str(e)}"))
     finally:
         if driver:
             print("Closing browser gracefully")
@@ -334,7 +417,6 @@ def calculate_end_time(schedule_id, start_time):
     start_index = times.index(start_time)
     try:
         start_dt = datetime.strptime(start_time, "%I:%M %p")
-        
         break_start = datetime.strptime("12:00 PM", "%I:%M %p")
         break_end = datetime.strptime("1:00 PM", "%I:%M %p")
         
@@ -364,22 +446,25 @@ def add_slot():
         date_obj = datetime.strptime(date.strip(), "%d %m %Y")
         day = date_obj.strftime("%A")
         combo_day.set(day)
+        current_date = datetime.now().date()
+        if date_obj.date() < current_date:
+            messagebox.showwarning("Invalid Date", "Please select a future date for booking.")
+            return
     except ValueError:
         messagebox.showwarning("Invalid Date", "Please enter a valid date.")
         return
 
     start_time = entry_start_time.get()
     schedule_id = combo_schedule.get()
-    
     end_time = calculate_end_time(schedule_id, start_time)
     entry_end_time.set(end_time)
 
-    if not all([day, date, start_time, end_time]):
-        messagebox.showwarning("Input Missing", "Please fill in all slot fields.")
+    if not all([day, date, start_time, end_time, schedule_id]):
+        messagebox.showwarning("Input Missing", "Please fill in all slot fields and select a venue.")
         return
 
-    slot = {"day": day, "date": date, "start_time": start_time, "end_time": end_time}
-    slot_str = f"Day: {day}, Date: {date}, Start: {start_time}, End: {end_time}"
+    slot = {"day": day, "date": date, "start_time": start_time, "end_time": end_time, "venue": schedule_id}
+    slot_str = f"Venue: {schedule_id}, Day: {day}, Date: {date}, Start: {start_time}, End: {end_time}"
     
     if slot_str in listbox_slots.get(0, tk.END):
         messagebox.showwarning("Duplicate Slot", "This slot is already added.")
@@ -434,32 +519,25 @@ def run_booking(continuous=False):
 
     username = entry_username.get()
     password = entry_password.get()
-    choice = combo_schedule.get()
     browser_choice = combo_browser.get()
     headless_mode = headless_var.get()
     proxies = entry_proxies.get().split(",") if entry_proxies.get() else []
     check_until_time = entry_check_until.get().strip() or None
 
-    urls = {
-        "1731": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36638",
-        "1851": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36298",
-        "1852": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=37641",
-        "1611": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36137"
-    }
-
-    if choice not in urls:
-        messagebox.showerror("Error", "Invalid schedule selected.")
-        return
     if not slot_list:
         messagebox.showwarning("No Slots", "Please add at least one slot to book.")
         return
 
-    scheduler_url = urls[choice]
-    print(f"Starting booking process for {len(slot_list)} slots at {datetime.now().strftime('%H:%M:%S')}...")
-    
+    venue_slots = {}
+    for slot in slot_list:
+        venue = slot["venue"]
+        if venue not in venue_slots:
+            venue_slots[venue] = []
+        venue_slots[venue].append(slot)
+
     proxy = proxies[0] if proxies else None
     thread = threading.Thread(target=slot_booking_process, args=(
-        username, password, slot_list, scheduler_url, proxy, headless_mode, browser_choice, root, continuous, check_until_time
+        username, password, venue_slots, proxy, headless_mode, browser_choice, root, continuous, check_until_time
     ))
     active_threads.append(thread)
     thread.start()
@@ -495,6 +573,10 @@ def on_date_selected(event=None):
         date_obj = datetime.strptime(date.strip(), "%d %m %Y")
         day = date_obj.strftime("%A")
         combo_day.set(day)
+        current_date = datetime.now().date()
+        if date_obj.date() < current_date:
+            combo_day.set("")
+            messagebox.showwarning("Invalid Date", "Please select a future date for booking.")
     except ValueError:
         combo_day.set("")
 
@@ -555,7 +637,7 @@ ttk.Label(scrollable_frame, text="Password").pack(pady=5)
 entry_password = ttk.Entry(scrollable_frame, width=30, show="*")
 entry_password.pack()
 
-ttk.Label(scrollable_frame, text="Select Schedule").pack(pady=5)
+ttk.Label(scrollable_frame, text="Select Venue").pack(pady=5)
 combo_schedule = ttk.Combobox(scrollable_frame, values=["1731", "1851", "1852", "1611"], state="readonly")
 combo_schedule.pack()
 combo_schedule.set("1731")
@@ -577,7 +659,7 @@ ttk.Label(scrollable_frame, text="Check Until Time (HH:MM, e.g., 21:30, optional
 entry_check_until = ttk.Entry(scrollable_frame, width=30)
 entry_check_until.pack()
 
-ttk.Label(scrollable_frame, text="Date (Select or Type, e.g., 16 May 2025)").pack(pady=5)
+ttk.Label(scrollable_frame, text="Date (Select or Type, e.g., 22 May 2025)").pack(pady=5)
 entry_date = DateEntry(scrollable_frame, width=30, date_pattern="dd mm yyyy", state="normal")
 entry_date.pack()
 entry_date.bind("<<DateEntrySelected>>", on_date_selected)
