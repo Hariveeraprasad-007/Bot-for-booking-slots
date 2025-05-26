@@ -1,715 +1,415 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
-from tkcalendar import DateEntry
+import streamlit as st
+import time
+import requests
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.firefox.options import Options as FirefoxOptions
-from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import StaleElementReferenceException, NoSuchElementException, TimeoutException, ElementClickInterceptedException
-import threading
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
 import re
-from datetime import datetime, timedelta
-import schedule
-try:
-    from playsound import playsound
-    SOUND_AVAILABLE = True
-except ImportError:
-    SOUND_AVAILABLE = False
-try:
-    import GPUtil
-    GPU_AVAILABLE = True
-except ImportError:
-    GPU_AVAILABLE = False
+from datetime import datetime
+import uuid
 
-# Global lists to hold slot details, active threads, and drivers
-slot_list = []
-active_threads = []
-active_drivers = []
-scheduled_time = None
+# Streamlit configuration
+st.set_page_config(page_title="Moodle Quiz Automator", layout="centered")
+st.markdown("""
+    <style>
+    .main { background-color: #f5f5f5; padding: 20px; border-radius: 10px; }
+    .stButton>button { background-color: #4CAF50; color: white; border-radius: 5px; }
+    .stTextInput>div>input, .stTextArea>div>textarea { border-radius: 5px; }
+    .error { color: #d32f2f; font-weight: bold; }
+    .success { color: #388e3c; font-weight: bold; }
+    .progress { color: #0288d1; font-weight: bold; }
+    </style>
+""", unsafe_allow_html=True)
 
-def check_gpu_availability():
-    """Check if a GPU is available and return appropriate browser options."""
-    if GPU_AVAILABLE:
-        try:
-            gpus = GPUtil.getGPUs()
-            if gpus and any(gpu.load < 0.9 for gpu in gpus):
-                print("GPU detected and available.")
-                return True, "--enable-gpu"
-            else:
-                print("No available GPU or GPU fully utilized. Falling back to CPU.")
-                return False, "--disable-gpu"
-        except Exception as e:
-            print(f"Error checking GPU: {e}. Falling back to CPU.")
-            return False, "--disable-gpu"
-    else:
-        print("GPUtil not installed. Falling back to CPU.")
-        return False, "--disable-gpu"
+# Interface
+st.title("📚 Moodle Quiz Automator")
+st.write("Automate your Moodle quizzes and view your marks instantly!")
 
-def parse_slot_date(date_str):
-    """Parse the date string from datelabel and return a datetime object."""
+# Load Gemini API key from secrets
+gemini_api_key = st.secrets.get("GEMINI_API_KEY", None)
+
+with st.form("quiz_form"):
+    st.subheader("Enter Quiz Details")
+    col1, col2 = st.columns(2)
+    with col1:
+        login_url = st.text_input("Moodle Login URL", value="https://lms2.ai.saveetha.in/login/index.php")
+        username = st.text_input("Username", value="23009466")
+        password = st.text_input("Password", type="password")
+    with col2:
+        quiz_urls = st.text_area("Quiz URLs (comma-separated)", value="https://lms2.ai.saveetha.in/mod/quiz/view.php?id=1790")
+        if not gemini_api_key:
+            gemini_api_key = st.text_input("Gemini API Key", type="password")
+    
+    submit_button = st.form_submit_button("Start Automation 🚀")
+
+# Instructions
+with st.expander("ℹ How to Get a Gemini API Key"):
+    st.markdown("""
+    1. Visit [Google AI Studio](https://aistudio.google.com/app/apikey) and sign in.
+    2. Click *Create API Key* and copy the key.
+    3. For higher usage, enable billing in [Google Cloud Console](https://console.cloud.google.com/) and enable the *Generative Language API*.
+    4. Paste the key above or add it to `.streamlit/secrets.toml`. The free tier allows ~1,500 requests/day.
+    """)
+
+# Gemini function with enhanced error handling
+def ask_gemini(question, options, gemini_api_key):
+    start_time = time.time()
+    option_letters = ['a', 'b', 'c', 'd']
+    formatted_options = "\n".join([f"{letter}. {opt}" for letter, opt in zip(option_letters, options[:len(option_letters)])])
+    prompt = (
+        f"Question: {question}\n\nOptions:\n{formatted_options}\n\nAnswer with ONLY the letter of the correct option ({', '.join(option_letters[:len(options)])}):"
+    )
+    headers = {"Content-Type": "application/json"}
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
-        date_part = date_str.split(", ")[1]  # "22 May 2025"
-        return datetime.strptime(date_part, "%d %B %Y")
-    except (ValueError, IndexError) as e:
-        print(f"Error parsing date '{date_str}': {e}")
-        return None
-
-def check_existing_booking(driver, scheduler_url):
-    """Check for upcoming and freezed slots, returning both lists separately."""
-    driver.get(scheduler_url)
-    current_date = datetime.now()
-    upcoming_slots = []
-    freezed_slots = []
-    try:
-        print("Looking for 'Upcoming slots' section...")
-        try:
-            upcoming_header = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Upcoming slots')]"))
-            )
-            print("'Upcoming slots' section found.")
-            upcoming_table = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Upcoming slots')]/following::table[contains(@class, 'generaltable')]"))
-            )
-            print("Upcoming slots table located.")
-            rows = upcoming_table.find_elements(By.TAG_NAME, "tr")[1:]
-            for row in rows:
-                try:
-                    date_div = row.find_element(By.CLASS_NAME, "datelabel")
-                    time_div = row.find_element(By.CLASS_NAME, "timelabel")
-                    date_str = date_div.text.strip()
-                    slot_date = parse_slot_date(date_str)
-                    if slot_date:
-                        if slot_date.date() >= current_date.date():
-                            date_time = f"{date_str} {time_div.text.strip()}"
-                            upcoming_slots.append(date_time)
-                        else:
-                            print(f"Skipping past slot in Upcoming section: {date_str}")
-                    else:
-                        print(f"Could not parse date for slot: {date_str}")
-                except Exception as e:
-                    print(f"Error extracting date/time from upcoming slot row: {e}")
-                    continue
-        except TimeoutException:
-            print("No 'Upcoming slots' section found within timeout.")
-
-        print("Looking for 'Freezed slots', 'Past slots', or related sections...")
-        try:
-            freezed_header = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Freezed slots') or contains(text(), 'Past slots') or contains(text(), 'Missed slots') or contains(text(), 'Expired slots') or contains(text(), 'Completed slots')]"))
-            )
-            print("'Freezed slots' section found.")
-            freezed_table = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.XPATH, "//h3[contains(text(), 'Freezed slots') or contains(text(), 'Past slots') or contains(text(), 'Missed slots') or contains(text(), 'Expired slots') or contains(text(), 'Completed slots')]/following::table[contains(@class, 'generaltable')]"))
-            )
-            print("Freezed slots table located.")
-            rows = freezed_table.find_elements(By.TAG_NAME, "tr")[1:]
-            for row in rows:
-                try:
-                    date_div = row.find_element(By.CLASS_NAME, "datelabel")
-                    time_div = row.find_element(By.CLASS_NAME, "timelabel")
-                    date_str = date_div.text.strip()
-                    slot_date = parse_slot_date(date_str)
-                    if slot_date:
-                        if slot_date.date() < current_date.date():
-                            date_time = f"{date_str} {time_div.text.strip()}"
-                            freezed_slots.append(date_time)
-                        else:
-                            print(f"Skipping future slot in freezed section: {date_str}")
-                    else:
-                        print(f"Could not parse date for freezed slot: {date_str}")
-                except Exception as e:
-                    print(f"Error extracting date/time from freezed slot row: {e}")
-                    continue
-        except TimeoutException:
-            print("No 'Freezed slots', 'Past slots', or related section found within timeout.")
-
-        print("Checking for 'Cancel booking' button as fallback...")
-        cancel_button = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel booking')]")
-        has_upcoming_booking = bool(cancel_button)
-
-        all_slots = upcoming_slots + freezed_slots
-        if freezed_slots:
-            print(f"Found freezed slots: {freezed_slots}")
-        if upcoming_slots:
-            print(f"Found upcoming slots: {upcoming_slots}")
-        if not all_slots and has_upcoming_booking:
-            print("Cancel booking button found, but no slot details extracted.")
-            all_slots = ["Upcoming slot exists, but details could not be retrieved"]
-
-        return has_upcoming_booking, all_slots if all_slots else ["No slots found"], freezed_slots
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_api_key}",
+            json=payload,
+            headers=headers,
+            timeout=15
+        )
+        response.raise_for_status()
+        generated_text = response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip().lower()
+        match = re.match(r"^\s*([a-d])", generated_text)
+        return match.group(1) if match and match.group(1) in option_letters[:len(options)] else "", time.time() - start_time
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 429:
+            return "", time.time() - start_time, "Rate limit exceeded for Gemini API"
+        return "", time.time() - start_time, f"Gemini API error: {e}"
     except Exception as e:
-        print(f"Unexpected error while checking existing bookings: {e}")
-        cancel_button = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel booking')]")
-        has_upcoming_booking = bool(cancel_button)
-        return has_upcoming_booking, ["Error retrieving slot details"] if has_upcoming_booking else ["No slots found"], freezed_slots
+        return "", time.time() - start_time, f"Gemini API request failed: {e}"
 
-def slot_booking_process(username_input, password_input, venue_slots, proxy, headless, browser_choice, root, continuous=False, check_until_time=None):
-    driver = None
-    booked_slots = []
-    failed_slots = []
+# Check for HTTP errors
+def check_http_error(driver):
     try:
-        use_gpu, gpu_arg = check_gpu_availability()
-        root.after(0, lambda: status_label.config(text=f"Using {'GPU' if use_gpu else 'CPU'} | Booking slots..."))
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        return bool(soup.find(string=re.compile(r'(503|429|500)\s*(Service Unavailable|Too Many Requests|Internal Server Error)', re.I)))
+    except:
+        return False
 
-        deadline = None
-        if check_until_time:
-            try:
-                deadline = datetime.strptime(check_until_time, "%H:%M")
-                deadline = datetime.now().replace(hour=deadline.hour, minute=deadline.minute, second=0, microsecond=0)
-                if deadline < datetime.now():
-                    deadline = deadline.replace(day=deadline.day + 1)
-                print(f"Will check until {deadline.strftime('%H:%M:%S')}")
-            except ValueError:
-                print(f"Invalid check until time format: {check_until_time}")
-                root.after(0, lambda: messagebox.showerror("Error", "Invalid check until time format. Use HH:MM (e.g., 21:30)."))
-                return
-
-        if browser_choice == "Chrome":
-            options = ChromeOptions()
-            if headless:
-                options.add_argument("--headless=new")
-                options.add_argument("--no-sandbox")
-                options.add_argument("--disable-dev-shm-usage")
-            options.add_argument(gpu_arg)
-            if proxy:
-                options.add_argument(f'--proxy-server={proxy}')
-            options.add_argument("--page-load-strategy=eager")
-            driver = webdriver.Chrome(options=options)
-        elif browser_choice == "Firefox":
-            options = FirefoxOptions()
-            if headless:
-                options.add_argument("--headless")
-            if proxy:
-                options.set_preference("network.proxy.type", 1)
-                options.set_preference("network.proxy.http", proxy.split(":")[0])
-                options.set_preference("network.proxy.http_port", int(proxy.split(":")[1]))
-            driver = webdriver.Firefox(options=options)
-        elif browser_choice == "Edge":
-            options = EdgeOptions()
-            if headless:
-                options.add_argument("--headless")
-            if proxy:
-                options.add_argument(f'--proxy-server={proxy}')
-            driver = webdriver.Edge(options=options)
+# Main logic
+if submit_button:
+    if not all([login_url, quiz_urls, username, password, gemini_api_key]):
+        st.markdown('<p class="error">Please fill in all fields.</p>', unsafe_allow_html=True)
+    else:
+        quiz_url_list = [url.strip() for url in quiz_urls.split(",") if url.strip()]
+        if not quiz_url_list:
+            st.markdown('<p class="error">No valid quiz URLs provided.</p>', unsafe_allow_html=True)
         else:
-            raise ValueError("Unsupported browser selected")
+            quiz_results = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            progress_log = st.empty()
 
-        active_drivers.append(driver)
-        driver.maximize_window()
-        print(f"Running in {browser_choice} {'headless' if headless else 'visible'} mode with {'GPU' if use_gpu else 'CPU'}")
-        driver.implicitly_wait(0.5)
+            # Initialize progress log
+            progress_messages = []
 
-        print("Navigating to login page")
-        driver.get("https://lms2.ai.saveetha.in/course/view.php?id=302")
-        WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.NAME, 'username'))).send_keys(username_input)
-        driver.find_element(By.NAME, 'password').send_keys(password_input)
-        driver.find_element(By.ID, 'loginbtn').click()
-        print("Logged in successfully")
+            def update_progress(message, quiz_index=None, total_quizzes=None, duration=None):
+                if quiz_index is not None and total_quizzes is not None:
+                    prefix = f"[Quiz {quiz_index}/{total_quizzes}] "
+                else:
+                    prefix = ""
+                if duration is not None:
+                    message = f"{message} ({duration:.2f}s)"
+                progress_messages.append(f"{prefix}{message}")
+                # Limit to last 5 messages
+                progress_log.markdown('<p class="progress">' + "<br>".join(progress_messages[-5:]) + '</p>', unsafe_allow_html=True)
 
-        urls = {
-            "1731": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36638",
-            "1851": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36298",
-            "1852": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=37641",
-            "1611": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36137"
-        }
-
-        for venue, slots in venue_slots.items():
+            # Selenium setup
+            driver = None
             try:
-                scheduler_url = urls[venue]
-                print(f"Checking for existing bookings at venue {venue}...")
-                has_booking, booked_slots_info, freezed_slots = check_existing_booking(driver, scheduler_url)
-                if has_booking:
-                    print(f"User already has upcoming bookings at venue {venue}: {booked_slots_info}")
-                    for slot in slots:
-                        slot_str = f"Venue: {venue}, Day: {slot['day']}, Date: {slot['date']}, Start: {slot['start_time']}, End: {slot['end_time']}"
-                        failed_slots.append(f"{slot_str} - Already booked: {', '.join(booked_slots_info)}")
-                    continue
+                chrome_options = webdriver.ChromeOptions()
+                chrome_options.add_argument("--headless")
+                chrome_options.add_argument("--no-sandbox")
+                chrome_options.add_argument("--disable-dev-shm-usage")
+                chrome_options.add_argument("--disable-gpu")
+                driver = webdriver.Chrome(
+                    service=ChromeService(ChromeDriverManager().install()),
+                    options=chrome_options
+                )
+                wait = WebDriverWait(driver, 20)  # Increased timeout
+                update_progress("WebDriver initialized successfully")
+            except Exception as e:
+                st.markdown(f'<p class="error">Failed to initialize WebDriver: {e}</p>', unsafe_allow_html=True)
+                st.stop()
 
-                for slot in slots:
-                    day, date, start_time, end_time = slot["day"], slot["date"], slot["start_time"], slot["end_time"]
-                    slot_str = f"Venue: {venue}, Day: {day}, Date: {date}, Start: {start_time}, End: {end_time}"
-                    print(f"Attempting to book slot at venue {venue}: {day}, {date}, {start_time}-{end_time}")
-
-                    if deadline and datetime.now() > deadline:
-                        print(f"Deadline {deadline.strftime('%H:%M:%S')} reached. Slot not booked: {slot_str}")
-                        failed_slots.append(f"{slot_str} - Deadline reached")
+            try:
+                # Login
+                start_time = time.time()
+                update_progress("Logging in...")
+                driver.get(login_url)
+                max_retries = 3
+                for attempt in range(max_retries):
+                    if check_http_error(driver):
+                        update_progress(f"HTTP error detected during login, retrying (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                        driver.refresh()
                         continue
+                    break
+                else:
+                    st.markdown('<p class="error">Failed to bypass HTTP error during login</p>', unsafe_allow_html=True)
+                    st.stop()
+                wait.until(EC.visibility_of_element_located((By.ID, 'username'))).send_keys(username)
+                wait.until(EC.visibility_of_element_located((By.ID, 'password'))).send_keys(password)
+                wait.until(EC.element_to_be_clickable((By.ID, 'loginbtn'))).click()
+                time.sleep(2)
+                update_progress("Login successful", duration=time.time() - start_time)
 
-                    max_retries_503 = 3
-                    for retry in range(max_retries_503):
-                        try:
-                            print(f"Loading scheduler page for venue {venue} (attempt {retry + 1}/{max_retries_503})...")
-                            driver.get(scheduler_url)
-                            print("Page loaded successfully.")
-                            break
-                        except Exception as e:
-                            page_source = driver.page_source
-                            if "503 Service Temporarily Unavailable" in page_source:
-                                print(f"503 Error detected, retrying ({retry + 1}/{max_retries_503})...")
-                                if retry == max_retries_503 - 1:
-                                    print("Max retries for 503 error reached.")
-                                    failed_slots.append(f"{slot_str} - 503 Service Unavailable")
-                                    continue
-                            else:
-                                print(f"Unexpected error while loading page for venue {venue}: {e}")
-                                failed_slots.append(f"{slot_str} - Page load error: {str(e)}")
-                                continue
-
-                    all_rows = None
-                    max_retries_slot_table = 2
-                    for retry in range(max_retries_slot_table):
-                        try:
-                            print(f"Attempting to locate slot table for venue {venue} (attempt {retry + 1}/{max_retries_slot_table})...")
-                            all_rows = WebDriverWait(driver, 3).until(
-                                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tr"))
-                            )
-                            print(f"Scheduler page for venue {venue} loaded with {len(all_rows)} rows in slot table.")
-                            break
-                        except TimeoutException:
-                            print(f"Timeout while locating slot table for venue {venue}.")
-                            page_source = driver.page_source
-                            if "slotbookertable" not in page_source:
-                                print(f"Slot table not found in page source for venue {venue}.")
-                                freezed_indicators = ["Freezed slots", "Past slots", "Missed slots", "Expired slots", "Completed slots", "freezed", "past booking"]
-                                has_booking, _, freezed_slots = check_existing_booking(driver, scheduler_url)
-                                has_freezed_indicators = any(indicator in page_source.lower() for indicator in freezed_indicators)
-                                if freezed_slots or has_freezed_indicators:
-                                    print(f"Freezed slots or indicators detected for venue {venue}: {freezed_slots}")
-                                    failed_slots.append(f"{slot_str} - Slot time and date was freezed: {', '.join(freezed_slots) if freezed_slots else 'Past bookings detected'}")
-                                else:
-                                    print(f"No freezed slots or indicators found for venue {venue}. Assuming no slots are available.")
-                                    failed_slots.append(f"{slot_str} - No slots available")
-                                break
-                            if retry == max_retries_slot_table - 1:
-                                print(f"Max retries reached for locating slot table at venue {venue}.")
-                                failed_slots.append(f"{slot_str} - Slot table not found")
-                                break
-
-                    if not all_rows:
-                        continue
+                # Process quizzes
+                for quiz_index, quiz_url in enumerate(quiz_url_list, 1):
+                    status_text.text(f"Processing Quiz {quiz_index}/{len(quiz_url_list)}: {quiz_url}")
+                    progress_bar.progress(quiz_index / len(quiz_url_list))
+                    result = {"url": quiz_url, "status": "Failed", "marks": "N/A", "error": None}
 
                     try:
-                        date_obj = datetime.strptime(date.strip(), "%d %m %Y")
-                        formatted_date = date_obj.strftime("%d %B %Y")
-                    except ValueError:
-                        print(f"Invalid date format: {date}")
-                        failed_slots.append(f"{slot_str} - Invalid date format")
+                        start_time = time.time()
+                        update_progress(f"Navigating to quiz", quiz_index, len(quiz_url_list))
+                        driver.get(quiz_url)
+                        for attempt in range(max_retries):
+                            if check_http_error(driver):
+                                update_progress(f"HTTP error detected for quiz page, retrying (attempt {attempt + 1}/{max_retries})", quiz_index, len(quiz_url_list))
+                                time.sleep(2 ** attempt)
+                                driver.refresh()
+                                continue
+                            break
+                        else:
+                            result["error"] = "Failed to bypass HTTP error for quiz page"
+                            quiz_results.append(result)
+                            continue
+                        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "page-header-headings")))
+                        update_progress("Quiz page loaded", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                    except Exception as e:
+                        result["error"] = f"Failed to navigate to quiz: {e}"
+                        quiz_results.append(result)
                         continue
 
-                    expected_date_formats = [
-                        formatted_date,
-                        date_obj.strftime("%B %d, %Y"),
-                        date_obj.strftime("%d/%m/%Y"),
-                        f"{day.strip()}, {formatted_date}"
-                    ]
-
-                    current_date_header_text = ""
-                    booked = False
-                    for i in range(len(all_rows)):
+                    # Start quiz
+                    try:
+                        start_time = time.time()
+                        update_progress(f"Attempting to start quiz", quiz_index, len(quiz_url_list))
+                        quiz_button_xpath = "//button[contains(text(),'Attempt quiz') or contains(text(),'Re-attempt quiz') or contains(text(),'Continue your attempt')] | //input[contains(@value,'Attempt quiz') or contains(@value,'Re-attempt quiz') or contains(@value,'Continue your attempt')]"
+                        quiz_button = wait.until(EC.element_to_be_clickable((By.XPATH, quiz_button_xpath)))
+                        driver.execute_script("arguments[0].click();", quiz_button)
+                        time.sleep(2)
+                        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "qtext")))
+                        update_progress("Quiz started", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                    except:
                         try:
-                            all_rows = WebDriverWait(driver, 2).until(
-                                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tr"))
-                            )
-                            row = all_rows[i]
-                            row_text = row.text.strip()
-
-                            date_header_match = re.search(r'\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b', row_text)
-                            if date_header_match:
-                                current_date_header_text = date_header_match.group(0).strip()
-                            else:
-                                for date_format in expected_date_formats:
-                                    if date_format in row_text:
-                                        current_date_header_text = date_format
-                                        break
-
-                            if current_date_header_text and any(current_date_header_text == fmt for fmt in expected_date_formats):
-                                time_cells = row.find_elements(By.TAG_NAME, 'td')
-                                for k in range(len(time_cells) - 1):
-                                    cell_text = time_cells[k].text.strip()
-                                    next_cell_text = time_cells[k + 1].text.strip()
-                                    if start_time.strip() in cell_text and end_time.strip() in next_cell_text:
-                                        print(f"Found matching slot at venue {venue}: {cell_text} to {next_cell_text}")
-                                        if "Booked" in row.text:
-                                            print(f"Slot already booked at venue {venue}, skipping...")
-                                            failed_slots.append(f"{slot_str} - Already booked")
-                                            booked = True
-                                            break
-
-                                        book_button = row.find_element(By.XPATH, ".//button[contains(text(), 'Book slot')]")
-                                        driver.execute_script("arguments[0].scrollIntoView(true);", book_button)
-                                        WebDriverWait(driver, 2).until(EC.element_to_be_clickable(book_button))
-                                        try:
-                                            book_button.click()
-                                        except ElementClickInterceptedException:
-                                            driver.execute_script("arguments[0].click();", book_button)
-
-                                        note_field = WebDriverWait(driver, 2).until(
-                                            EC.visibility_of_element_located((By.ID, "id_studentnote_editoreditable"))
-                                        )
-                                        note_field.send_keys("Booking for project work")
-                                        submit_button = WebDriverWait(driver, 2).until(
-                                            EC.element_to_be_clickable((By.ID, "id_submitbutton"))
-                                        )
-                                        try:
-                                            submit_button.click()
-                                        except ElementClickInterceptedException:
-                                            driver.execute_script("arguments[0].click();", submit_button)
-
-                                        has_booking, _, _ = check_existing_booking(driver, scheduler_url)
-                                        if has_booking:
-                                            print(f"Slot booked successfully at venue {venue}: {day}, {date}, {start_time}-{end_time}")
-                                            booked_slots.append(slot_str)
-                                            booked = True
-                                        else:
-                                            print(f"Booking failed for {slot_str}")
-                                            failed_slots.append(f"{slot_str} - Booking failed")
-                                        break
-                        except StaleElementReferenceException:
-                            print(f"Stale element encountered at venue {venue}, skipping slot...")
-                            failed_slots.append(f"{slot_str} - Stale element error")
-                            break
+                            start_attempt_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Start attempt')] | //input[contains(@value,'Start attempt')]")))
+                            driver.execute_script("arguments[0].click();", start_attempt_button)
+                            time.sleep(2)
+                            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "qtext")))
+                            update_progress("Quiz started after confirmation", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
                         except Exception as e:
-                            print(f"Error booking slot at venue {venue}: {e}")
-                            failed_slots.append(f"{slot_str} - Error: {str(e)}")
+                            result["error"] = f"Could not start quiz: {e}"
+                            page_source = driver.page_source
+                            st.download_button(
+                                label=f"Download Quiz {quiz_index} Start Page Source",
+                                data=page_source,
+                                file_name=f"quiz_start_page_source_{quiz_index}.html",
+                                mime="text/html"
+                            )
+                            quiz_results.append(result)
+                            continue
+
+                    # Process questions
+                    page_count = 0
+                    finish_attempt_xpath = "//input[@value='Finish attempt ...' and @name='next' and @id='mod_quiz-next-nav']"
+                    while True:
+                        page_count += 1
+                        start_time = time.time()
+                        update_progress(f"Processing question page {page_count}", quiz_index, len(quiz_url_list))
+                        for attempt in range(max_retries):
+                            if check_http_error(driver):
+                                update_progress(f"HTTP error detected on question page {page_count}, retrying (attempt {attempt + 1}/{max_retries})", quiz_index, len(quiz_url_list))
+                                time.sleep(2 ** attempt)
+                                driver.refresh()
+                                continue
+                            break
+                        else:
+                            update_progress(f"Failed to bypass HTTP error on question page {page_count}", quiz_index, len(quiz_url_list))
+                            st.markdown(f'<p class="error">Failed to bypass HTTP error for question {page_count} in quiz {quiz_index}</p>', unsafe_allow_html=True)
                             break
 
-                    if not booked:
-                        failed_slots.append(f"{slot_str} - Slot not found")
+                        try:
+                            question_element = wait.until(EC.visibility_of_element_located((By.CLASS_NAME, "qtext")))
+                            question_text = question_element.text.strip()
+                            update_progress(f"Found question: {question_text[:50]}...", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                            start_time = time.time()
+                            answer_block = wait.until(EC.visibility_of_element_located((By.CLASS_NAME, "answer")))
+                            soup = BeautifulSoup(answer_block.get_attribute('outerHTML'), 'html.parser')
+                            option_texts, radio_elements = [], []
+                            for inp in soup.find_all('input', {'type': 'radio'}):
+                                option_id = inp.get('id')
+                                if option_id:
+                                    label_text = ""
+                                    if label_id := inp.get('aria-labelledby'):
+                                        if label_div := soup.find(id=label_id):
+                                            label_text = label_div.get_text(strip=True)
+                                    elif soup.find('label', {'for': option_id}):
+                                        label_text = soup.find('label', {'for': option_id}).get_text(strip=True)
+                                    elif inp.find_next_sibling('label'):
+                                        label_text = " ".join(inp.find_next_sibling('label').get_text(strip=True).split())
+                                    if label_text:
+                                        option_texts.append(label_text)
+                                        try:
+                                            radio_elements.append(driver.find_element(By.ID, option_id))
+                                        except:
+                                            option_texts.pop()
+                                            continue
+                            update_progress(f"Parsed options", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                            if option_texts and len(option_texts) == len(radio_elements):
+                                update_progress(f"Found {len(option_texts)} options: {', '.join(option_texts[:2])}...", quiz_index, len(quiz_url_list))
+                                start_time = time.time()
+                                model_answer_letter, gemini_duration, gemini_error = ask_gemini(question_text, option_texts, gemini_api_key)
+                                if gemini_error:
+                                    update_progress(f"Gemini error: {gemini_error}", quiz_index, len(quiz_url_list))
+                                    st.markdown(f'<p class="error">Gemini error for question {page_count} in quiz {quiz_index}: {gemini_error}</p>', unsafe_allow_html=True)
+                                update_progress(f"Gemini responded", quiz_index, len(quiz_url_list), duration=gemini_duration)
+                                if model_answer_letter in 'abcd'[:len(option_texts)]:
+                                    answer_index = ord(model_answer_letter) - ord('a')
+                                    if 0 <= answer_index < len(radio_elements):
+                                        start_time = time.time()
+                                        wait.until(EC.element_to_be_clickable(radio_elements[answer_index]))
+                                        driver.execute_script("arguments[0].click();", radio_elements[answer_index])
+                                        update_progress(f"Selected option {model_answer_letter}: {option_texts[answer_index][:50]}...", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                                    else:
+                                        update_progress(f"Invalid Gemini response: {model_answer_letter} out of bounds", quiz_index, len(quiz_url_list))
+                                        st.markdown(f'<p class="error">Failed to select option for question {page_count} in quiz {quiz_index}: Invalid Gemini response</p>', unsafe_allow_html=True)
+                                else:
+                                    update_progress(f"Gemini returned invalid/no response: {model_answer_letter}", quiz_index, len(quiz_url_list))
+                                    st.markdown(f'<p class="error">Failed to select option for question {page_count} in quiz {quiz_index}: Invalid Gemini response</p>', unsafe_allow_html=True)
+                            else:
+                                update_progress("No valid options found for question", quiz_index, len(quiz_url_list))
+                                st.markdown(f'<p class="error">No valid options found for question {page_count} in quiz {quiz_index}</p>', unsafe_allow_html=True)
+                        except Exception as e:
+                            update_progress(f"No question found on page {page_count}: {e}", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
 
-            except Exception as e:
-                print(f"Error processing venue {venue}: {e}")
-                for slot in slots:
-                    slot_str = f"Venue: {venue}, Day: {slot['day']}, Date: {slot['date']}, Start: {slot['start_time']}, End: {slot['end_time']}"
-                    failed_slots.append(f"{slot_str} - Venue processing error: {str(e)}")
+                        try:
+                            start_time = time.time()
+                            finish_btn = wait.until(EC.element_to_be_clickable((By.XPATH, finish_attempt_xpath)))
+                            update_progress("Found 'Finish attempt ...' button", quiz_index, len(quiz_url_list))
+                            driver.execute_script("arguments[0].click();", finish_btn)
+                            time.sleep(2)
+                            update_progress("Clicked 'Finish attempt ...'", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                            start_time = time.time()
+                            submit_all_btn1 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@type='submit' and contains(text(), 'Submit all and finish')]")))
+                            driver.execute_script("arguments[0].click();", submit_all_btn1)
+                            time.sleep(2)
+                            update_progress("Clicked first 'Submit all and finish'", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                            start_time = time.time()
+                            submit_all_btn2 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@type='button' and @data-action='save' and contains(text(), 'Submit all and finish')]")))
+                            driver.execute_script("arguments[0].click();", submit_all_btn2)
+                            time.sleep(2)
+                            update_progress("Clicked second 'Submit all and finish'", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                            start_time = time.time()
+                            finish_review_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[@class='mod_quiz-next-nav' and contains(text(), 'Finish review')]")))
+                            driver.execute_script("arguments[0].click();", finish_review_btn)
+                            time.sleep(2)
+                            update_progress("Clicked 'Finish review'", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
 
-        summary_message = "Booking Summary:\n\n"
-        if booked_slots:
-            summary_message += "Booked Slots:\n" + "\n".join(booked_slots) + "\n\n"
-        else:
-            summary_message += "Booked Slots: None\n\n"
-        if failed_slots:
-            summary_message += "Failed Slots:\n" + "\n".join(failed_slots)
-        else:
-            summary_message += "Failed Slots: None"
-        root.after(0, lambda: messagebox.showinfo("Booking Summary", summary_message))
-        if booked_slots and SOUND_AVAILABLE:
-            playsound('success.wav')
+                            # Extract marks
+                            try:
+                                start_time = time.time()
+                                update_progress("Extracting marks...", quiz_index, len(quiz_url_list))
+                                for attempt in range(max_retries):
+                                    if check_http_error(driver):
+                                        update_progress(f"HTTP error detected during marks extraction, retrying (attempt {attempt + 1}/{max_retries})", quiz_index, len(quiz_url_list))
+                                        time.sleep(2 ** attempt)
+                                        driver.refresh()
+                                        continue
+                                    break
+                                else:
+                                    result["error"] = "Failed to bypass HTTP error during marks extraction"
+                                    quiz_results.append(result)
+                                    break
+                                table = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table.quizattemptsummary")))
+                                soup = BeautifulSoup(table.get_attribute('outerHTML'), 'html.parser')
+                                rows = soup.find_all('tr', class_='lastrow')
+                                current_time = datetime.now()
+                                latest_marks = "N/A"
+                                latest_timestamp = None
+                                for row in rows:
+                                    try:
+                                        timestamp_cell = row.find('td', class_='c1')
+                                        marks_cell = row.find('td', class_='c2')
+                                        if timestamp_cell and marks_cell:
+                                            timestamp_text = timestamp_cell.find('span', class_='statedetails').get_text(strip=True)
+                                            marks = marks_cell.get_text(strip=True)
+                                            timestamp_match = re.search(r"Submitted\s+\w+,\s+(\d+\s+\w+\s+\d{4},\s+\d+:\d+\s+[AP]M)", timestamp_text)
+                                            if timestamp_match:
+                                                timestamp = datetime.strptime(timestamp_match.group(1), "%d %B %Y, %I:%M %p")
+                                                time_diff = (current_time - timestamp).total_seconds() / 60
+                                                if time_diff < 10 and (latest_timestamp is None or timestamp > latest_timestamp):
+                                                    latest_marks = marks
+                                                    latest_timestamp = timestamp
+                                    except:
+                                        continue
+                                update_progress(f"Marks extracted: {latest_marks}", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                                result["status"] = "Completed"
+                                result["marks"] = latest_marks
+                                quiz_results.append(result)
+                                break
+                            except Exception as e:
+                                result["error"] = f"Failed to extract marks: {e}"
+                                page_source = driver.page_source
+                                st.download_button(
+                                    label=f"Download Quiz {quiz_index} Marks Page Source",
+                                    data=page_source,
+                                    file_name=f"marks_page_source_{quiz_index}.html",
+                                    mime="text/html"
+                                )
+                                quiz_results.append(result)
+                                break
+                        except:
+                            start_time = time.time()
+                            update_progress("No 'Finish attempt ...' button found, checking for next page", quiz_index, len(quiz_url_list))
+                            try:
+                                next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@value='Next page']")))
+                                driver.execute_script("arguments[0].click();", next_btn)
+                                for attempt in range(max_retries):
+                                    if check_http_error(driver):
+                                        update_progress(f"HTTP error detected after next page click, retrying (attempt {attempt + 1}/{max_retries})", quiz_index, len(quiz_url_list))
+                                        time.sleep(2 ** attempt)
+                                        driver.refresh()
+                                        continue
+                                    break
+                                else:
+                                    update_progress(f"Failed to bypass HTTP error after next page click", quiz_index, len(quiz_url_list))
+                                    st.markdown(f'<p class="error">Failed to bypass HTTP error for question {page_count} in quiz {quiz_index}</p>', unsafe_allow_html=True)
+                                    break
+                                wait.until(EC.presence_of_element_located((By.CLASS_NAME, "qtext")))
+                                update_progress("Clicked 'Next page'", quiz_index, len(quiz_url_list), duration=time.time() - start_time)
+                            except Exception as e:
+                                result["error"] = f"Failed to navigate to next page: {e}"
+                                page_source = driver.page_source
+                                st.download_button(
+                                    label=f"Download Quiz {quiz_index} Page {page_count} Source",
+                                    data=page_source,
+                                    file_name=f"question_page_{quiz_index}_{page_count}_source.html",
+                                    mime="text/html"
+                                )
+                                quiz_results.append(result)
+                                break
 
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        root.after(0, lambda: messagebox.showerror("Error", f"❌ Unexpected error: {str(e)}"))
-    finally:
-        if driver:
-            print("Closing browser gracefully")
-            if driver in active_drivers:
-                active_drivers.remove(driver)
-            driver.quit()
+                # Display results
+                status_text.text("All quizzes processed!")
+                progress_bar.empty()
+                st.markdown('<p class="success">Processing complete!</p>', unsafe_allow_html=True)
+                with st.expander("📊 Quiz Results", expanded=True):
+                    for result in quiz_results:
+                        st.markdown(f"*Quiz URL*: {result['url']}")
+                        st.markdown(f"- *Status*: <span class='{'success' if result['status'] == 'Completed' else 'error'}'>{result['status']}</span>", unsafe_allow_html=True)
+                        st.markdown(f"- *Marks*: {result['marks']}")
+                        if result['error']:
+                            st.markdown(f"- *Error*: <span class='error'>{result['error']}</span>", unsafe_allow_html=True)
+                        st.markdown("---")
 
-def calculate_end_time(schedule_id, start_time):
-    """Calculate the end time based on venue rules and start time."""
-    times = venue_time_slots.get(schedule_id, [])
-    if not start_time or start_time not in times:
-        return ""
-    
-    start_index = times.index(start_time)
-    try:
-        start_dt = datetime.strptime(start_time, "%I:%M %p")
-        break_start = datetime.strptime("12:00 PM", "%I:%M %p")
-        break_end = datetime.strptime("1:00 PM", "%I:%M %p")
-        
-        if schedule_id in ["1731", "1851"]:
-            end_dt = start_dt + timedelta(hours=2)
-            if start_dt < break_start and end_dt > break_start:
-                end_dt = break_end + (end_dt - break_start)
-        elif schedule_id == "1852":
-            end_dt = start_dt + timedelta(hours=1)
-            if start_dt < break_start and end_dt > break_start:
-                end_dt = break_end
-        elif schedule_id == "1611":
-            end_dt = start_dt + timedelta(minutes=15)
-            if start_dt < break_start and end_dt > break_start:
-                end_dt = break_end
-
-        end_time = end_dt.strftime("%I:%M %p")
-        if end_time in times:
-            return end_time
-        return times[start_index + 1] if start_index + 1 < len(times) else times[-1]
-    except ValueError:
-        return times[start_index + 1] if start_index + 1 < len(times) else times[-1]
-
-def add_slot():
-    date = entry_date.get()
-    try:
-        date_obj = datetime.strptime(date.strip(), "%d %m %Y")
-        day = date_obj.strftime("%A")
-        combo_day.set(day)
-        current_date = datetime.now().date()
-        if date_obj.date() < current_date:
-            messagebox.showwarning("Invalid Date", "Please select a future date for booking.")
-            return
-    except ValueError:
-        messagebox.showwarning("Invalid Date", "Please enter a valid date.")
-        return
-
-    start_time = entry_start_time.get()
-    schedule_id = combo_schedule.get()
-    end_time = calculate_end_time(schedule_id, start_time)
-    entry_end_time.set(end_time)
-
-    if not all([day, date, start_time, end_time, schedule_id]):
-        messagebox.showwarning("Input Missing", "Please fill in all slot fields and select a venue.")
-        return
-
-    slot = {"day": day, "date": date, "start_time": start_time, "end_time": end_time, "venue": schedule_id}
-    slot_str = f"Venue: {schedule_id}, Day: {day}, Date: {date}, Start: {start_time}, End: {end_time}"
-    
-    if slot_str in listbox_slots.get(0, tk.END):
-        messagebox.showwarning("Duplicate Slot", "This slot is already added.")
-        return
-    
-    slot_list.append(slot)
-    listbox_slots.insert(tk.END, slot_str)
-    entry_start_time.set("")
-    entry_end_time.set("")
-
-def remove_slot():
-    selected = listbox_slots.curselection()
-    if selected:
-        index = selected[0]
-        listbox_slots.delete(index)
-        slot_list.pop(index)
-
-def stop_process():
-    schedule.clear()
-    global scheduled_time
-    scheduled_time = None
-    print("All scheduled jobs cleared.")
-
-    for driver in active_drivers[:]:
-        try:
-            driver.quit()
-            active_drivers.remove(driver)
-            print("Closed an active browser instance.")
-        except Exception as e:
-            print(f"Error closing driver: {e}")
-
-    for thread in active_threads[:]:
-        try:
-            active_threads.remove(thread)
-            print("Removed a tracked thread.")
-        except Exception as e:
-            print(f"Error removing thread: {e}")
-
-    messagebox.showinfo("Stopped", "All booking processes and schedules have been stopped.")
-    status_label.config(text="Status: Stopped")
-
-def run_booking(continuous=False):
-    global scheduled_time
-    if scheduled_time:
-        now = datetime.now()
-        scheduled = datetime.strptime(scheduled_time, "%H:%M")
-        scheduled_today = now.replace(hour=scheduled.hour, minute=scheduled.minute, second=0, microsecond=0)
-        time_diff = abs((now - scheduled_today).total_seconds())
-        if time_diff > 60:
-            print(f"Booking attempt ignored: Current time {now.strftime('%H:%M:%S')} is not within 1 minute of scheduled time {scheduled_time}")
-            return
-
-    username = entry_username.get()
-    password = entry_password.get()
-    browser_choice = combo_browser.get()
-    headless_mode = headless_var.get()
-    proxies = entry_proxies.get().split(",") if entry_proxies.get() else []
-    check_until_time = entry_check_until.get().strip() or None
-
-    if not slot_list:
-        messagebox.showwarning("No Slots", "Please add at least one slot to book.")
-        return
-
-    venue_slots = {}
-    for slot in slot_list:
-        venue = slot["venue"]
-        if venue not in venue_slots:
-            venue_slots[venue] = []
-        venue_slots[venue].append(slot)
-
-    proxy = proxies[0] if proxies else None
-    thread = threading.Thread(target=slot_booking_process, args=(
-        username, password, venue_slots, proxy, headless_mode, browser_choice, root, continuous, check_until_time
-    ))
-    active_threads.append(thread)
-    thread.start()
-
-def schedule_booking():
-    global scheduled_time
-    schedule_time = entry_schedule_time.get()
-    try:
-        datetime.strptime(schedule_time, "%H:%M")
-        schedule.clear()
-        scheduled_time = schedule_time
-        schedule.every().day.at(schedule_time).do(lambda: run_booking(continuous=True))
-        print(f"Scheduled booking daily at {schedule_time}")
-        messagebox.showinfo("Scheduled", f"Booking scheduled daily at {schedule_time}. Next run: {schedule.next_run().strftime('%Y-%m-%d %H:%M:%S')}.")
-        status_label.config(text=f"Status: Scheduled at {schedule_time}")
-
-        def run_schedule():
-            while True:
-                now = datetime.now()
-                next_run = schedule.next_run()
-                if next_run:
-                    time_to_next = (next_run - now).total_seconds()
-                    print(f"Next scheduled run at {next_run.strftime('%H:%M:%S')} ({time_to_next:.0f} seconds from now)")
-                schedule.run_pending()
-                time.sleep(30)
-        threading.Thread(target=run_schedule, daemon=True).start()
-    except ValueError:
-        messagebox.showerror("Error", "Invalid time format. Use HH:MM (e.g., 21:03).")
-
-def on_date_selected(event=None):
-    date = entry_date.get()
-    try:
-        date_obj = datetime.strptime(date.strip(), "%d %m %Y")
-        day = date_obj.strftime("%A")
-        combo_day.set(day)
-        current_date = datetime.now().date()
-        if date_obj.date() < current_date:
-            combo_day.set("")
-            messagebox.showwarning("Invalid Date", "Please select a future date for booking.")
-    except ValueError:
-        combo_day.set("")
-
-def on_schedule_selected(event=None):
-    schedule_id = combo_schedule.get()
-    times = venue_time_slots.get(schedule_id, [])
-    entry_start_time['values'] = times
-    entry_end_time['values'] = times
-    if times:
-        entry_start_time.set(times[0])
-        entry_end_time.set(calculate_end_time(schedule_id, times[0]))
-    else:
-        entry_start_time.set("")
-        entry_end_time.set("")
-
-def on_start_time_selected(event=None):
-    schedule_id = combo_schedule.get()
-    start_time = entry_start_time.get()
-    end_time = calculate_end_time(schedule_id, start_time)
-    entry_end_time.set(end_time)
-
-root = tk.Tk()
-root.title("Enhanced Slot Booking Bot - Saveetha LMS")
-root.geometry("500x600")
-
-main_canvas = tk.Canvas(root)
-scrollbar = ttk.Scrollbar(root, orient="vertical", command=main_canvas.yview)
-scrollable_frame = ttk.Frame(main_canvas)
-
-scrollable_frame.bind(
-    "<Configure>",
-    lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
-)
-
-main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-main_canvas.configure(yscrollcommand=scrollbar.set)
-
-main_canvas.pack(side="left", fill="both", expand=True)
-scrollbar.pack(side="right", fill="y")
-
-def _on_mousewheel(event):
-    main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-main_canvas.bind_all("<MouseWheel>", _on_mousewheel)
-
-venue_time_slots = {
-    "1731": ["8:00 AM", "10:00 AM", "12:00 PM", "1:00 PM", "3:00 PM"],
-    "1851": ["8:00 AM", "10:00 AM", "12:00 PM", "1:00 PM", "3:00 PM"],
-    "1852": ["8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "12:00 PM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"],
-    "1611": ["8:00 AM", "8:15 AM", "8:30 AM", "8:45 AM", "9:00 AM", "9:15 AM", "9:30 AM", "9:45 AM", "10:00 AM", "10:15 AM", "10:30 AM", "10:45 AM", "11:00 AM", "11:15 AM", "11:30 AM", "11:45 AM", "12:00 PM", "1:00 PM", "1:15 PM", "1:30 PM", "1:45 PM", "2:00 PM", "2:15 PM", "2:30 PM", "2:45 PM", "3:00 PM", "3:15 PM", "3:30 PM", "3:45 PM", "4:00 PM", "4:15 PM", "4:30 PM"]
-}
-
-ttk.Label(scrollable_frame, text="Username").pack(pady=5)
-entry_username = ttk.Entry(scrollable_frame, width=30)
-entry_username.pack()
-
-ttk.Label(scrollable_frame, text="Password").pack(pady=5)
-entry_password = ttk.Entry(scrollable_frame, width=30, show="*")
-entry_password.pack()
-
-ttk.Label(scrollable_frame, text="Select Venue").pack(pady=5)
-combo_schedule = ttk.Combobox(scrollable_frame, values=["1731", "1851", "1852", "1611"], state="readonly")
-combo_schedule.pack()
-combo_schedule.set("1731")
-
-ttk.Label(scrollable_frame, text="Select Browser").pack(pady=5)
-combo_browser = ttk.Combobox(scrollable_frame, values=["Chrome", "Firefox", "Edge"], state="readonly")
-combo_browser.pack()
-combo_browser.set("Chrome")
-
-ttk.Label(scrollable_frame, text="Proxies (comma-separated, e.g., http://proxy1:port,http://proxy2:port)").pack(pady=5)
-entry_proxies = ttk.Entry(scrollable_frame, width=50)
-entry_proxies.pack()
-
-ttk.Label(scrollable_frame, text="Schedule Time (HH:MM, e.g., 21:03)").pack(pady=5)
-entry_schedule_time = ttk.Entry(scrollable_frame, width=30)
-entry_schedule_time.pack()
-
-ttk.Label(scrollable_frame, text="Check Until Time (HH:MM, e.g., 21:30, optional)").pack(pady=5)
-entry_check_until = ttk.Entry(scrollable_frame, width=30)
-entry_check_until.pack()
-
-ttk.Label(scrollable_frame, text="Date (Select or Type, e.g., 22 May 2025)").pack(pady=5)
-entry_date = DateEntry(scrollable_frame, width=30, date_pattern="dd mm yyyy", state="normal")
-entry_date.pack()
-entry_date.bind("<<DateEntrySelected>>", on_date_selected)
-entry_date.bind("<FocusOut>", on_date_selected)
-
-ttk.Label(scrollable_frame, text="Day (Auto-filled)").pack(pady=5)
-days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-combo_day = ttk.Combobox(scrollable_frame, values=days, state="readonly")
-combo_day.pack()
-
-ttk.Label(scrollable_frame, text="Start Time").pack(pady=5)
-entry_start_time = ttk.Combobox(scrollable_frame, values=[], state="readonly", width=30)
-entry_start_time.pack()
-entry_start_time.bind("<<ComboboxSelected>>", on_start_time_selected)
-
-ttk.Label(scrollable_frame, text="End Time").pack(pady=5)
-entry_end_time = ttk.Combobox(scrollable_frame, values=[], state="readonly", width=30)
-entry_end_time.pack()
-
-button_add_slot = ttk.Button(scrollable_frame, text="Add Slot", command=add_slot)
-button_add_slot.pack(pady=5)
-
-button_remove_slot = ttk.Button(scrollable_frame, text="Remove Selected Slot", command=remove_slot)
-button_remove_slot.pack(pady=5)
-
-frame_slots = ttk.Frame(scrollable_frame)
-frame_slots.pack(pady=10)
-listbox_slots = tk.Listbox(frame_slots, height=5, width=60)
-scrollbar_slots = ttk.Scrollbar(frame_slots, orient="vertical", command=listbox_slots.yview)
-listbox_slots.config(yscrollcommand=scrollbar_slots.set)
-listbox_slots.pack(side="left", fill="both", expand=True)
-scrollbar_slots.pack(side="right", fill="y")
-
-headless_var = tk.BooleanVar()
-check_headless = ttk.Checkbutton(scrollable_frame, text="Run Headless (Continuous Refresh)", variable=headless_var)
-check_headless.pack(pady=10)
-
-status_label = ttk.Label(scrollable_frame, text="Status: Idle")
-status_label.pack(pady=5)
-
-button_book = ttk.Button(scrollable_frame, text="Book Slots Now", command=lambda: run_booking(continuous=True))
-button_book.pack(pady=10)
-
-button_schedule = ttk.Button(scrollable_frame, text="Schedule Booking", command=schedule_booking)
-button_schedule.pack(pady=10)
-
-button_stop = ttk.Button(scrollable_frame, text="Stop Process", command=stop_process)
-button_stop.pack(pady=10)
-
-combo_schedule.bind("<<ComboboxSelected>>", on_schedule_selected)
-on_schedule_selected()
-
-root.mainloop()
+            finally:
+                if driver:
+                    driver.quit()
+                    update_progress("WebDriver closed")
