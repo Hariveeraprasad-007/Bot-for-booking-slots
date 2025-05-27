@@ -72,6 +72,52 @@ def check_503_error(driver, url, max_attempts=5, wait_time=2):
     print(f"Failed to load page after {max_attempts} attempts due to 503 error or other issues.")
     return False
 
+from datetime import datetime, timezone, timedelta
+import time
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException, ElementClickInterceptedException
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver import Chrome, Firefox, Edge
+import re
+try:
+    from tkinter import messagebox
+except ImportError:
+    messagebox = None
+try:
+    from playsound import playsound
+    SOUND_AVAILABLE = True
+except ImportError:
+    SOUND_AVAILABLE = False
+
+active_drivers = []
+
+def check_503_error(driver, url, max_attempts=3):
+    for attempt in range(max_attempts):
+        try:
+            driver.get(url)
+            WebDriverWait(driver, 5).until(lambda d: d.execute_script("return document.readyState") == "complete")
+            if "503 Service Unavailable" not in driver.page_source:
+                print(f"Page loaded successfully: {url}")
+                return True
+            print(f"503 error detected on attempt {attempt + 1}")
+        except Exception as e:
+            print(f"Error loading page on attempt {attempt + 1}: {e}")
+        time.sleep(1)
+    return False
+
+def check_gpu_availability():
+    try:
+        import GPUtil
+        gpus = GPUtil.getGPUs()
+        return len(gpus) > 0, "--disable-gpu" if not len(gpus) else ""
+    except ImportError:
+        print("GPUtil not installed. Falling back to CPU.")
+        return False, "--disable-gpu"
+
 def slot_booking_process(username_input, password_input, day, date, start_time, end_time, scheduler_url, proxy, headless, browser_choice, root, continuous=False, check_until_time=None):
     driver = None
     try:
@@ -101,7 +147,7 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
             if proxy:
                 options.add_argument(f'--proxy-server={proxy}')
             options.add_argument("--page-load-strategy=eager")
-            driver = webdriver.Chrome(options=options)
+            driver = Chrome(options=options)
         elif browser_choice == "Firefox":
             options = FirefoxOptions()
             if headless:
@@ -110,14 +156,14 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                 options.set_preference("network.proxy.type", 1)
                 options.set_preference("network.proxy.http", proxy.split(":")[0])
                 options.set_preference("network.proxy.http_port", int(proxy.split(":")[1]))
-            driver = webdriver.Firefox(options=options)
+            driver = Firefox(options=options)
         elif browser_choice == "Edge":
             options = EdgeOptions()
             if headless:
                 options.add_argument("--headless")
             if proxy:
                 options.add_argument(f'--proxy-server={proxy}')
-            driver = webdriver.Edge(options=options)
+            driver = Edge(options=options)
         else:
             raise ValueError("Unsupported browser selected")
 
@@ -126,11 +172,11 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
         print(f"Running in {browser_choice} {'headless' if headless else 'visible'} mode with {'GPU' if use_gpu else 'CPU'}")
         driver.implicitly_wait(1)
 
-        # Navigate to login page with 503 error handling
+        # Navigate to login page
         login_url = "https://lms2.ai.saveetha.in/course/view.php?id=302"
         print("Navigating to login page")
         if not check_503_error(driver, login_url):
-            root.after(0, lambda: messagebox.showerror("Error", f"❌ Failed to load login page due to persistent 503 error"))
+            root.after(0, lambda: messagebox.showerror("Error", "❌ Failed to load login page due to persistent 503 error"))
             return
 
         WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.NAME, 'username'))).send_keys(username_input)
@@ -154,31 +200,18 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
         ]
         print(f"Looking for slot with date in formats: {expected_date_formats}, time: {start_time}-{end_time}")
 
-        # Navigate to scheduler page with 503 error handling
+        # Navigate to scheduler page
         if not check_503_error(driver, scheduler_url):
-            root.after(0, lambda: messagebox.showerror("Error", f"❌ Failed to load scheduler page due to persistent 503 error"))
+            root.after(0, lambda: messagebox.showerror("Error", "❌ Failed to load scheduler page due to persistent 503 error"))
             return
 
-        # Wait for page to be fully loaded
+        # Wait for page to load
         WebDriverWait(driver, 5).until(lambda d: d.execute_script("return document.readyState") == "complete")
         print("Scheduler page fully loaded")
 
-        # Check for LMS booking restrictions early
-        try:
-            booking_blocked = driver.find_element(By.CSS_SELECTOR, "div.studentbookingmessage").text
-            if "You cannot book further appointments" in booking_blocked:
-                print("Booking blocked by LMS")
-                root.after(0, lambda: messagebox.showwarning("Booking Blocked", "Cannot book due to LMS restrictions, likely due to a freezed slot."))
-            else:
-                print(f"LMS message found but not blocking: {booking_blocked}")
-        except NoSuchElementException:
-            print("No LMS restriction message found")
-            pass
-
-        # Check for existing booked slot in "Upcoming slots" only
+        # Check "Upcoming slots"
         try:
             print("Checking for 'Upcoming slots' section")
-            # Try multiple XPaths to locate the "Upcoming slots" table
             xpaths = [
                 "//div[@role='main']//h3[text()='Upcoming slots']/following-sibling::div[1]//table[@class='generaltable']",
                 "//h3[text()='Upcoming slots']/following-sibling::div[contains(@class, 'table-responsive')]//table[@class='generaltable']",
@@ -186,13 +219,12 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
             ]
             upcoming_slots_table = None
             for xpath in xpaths:
-                for _ in range(2):  # Retry twice per XPath
+                for _ in range(2):
                     try:
                         upcoming_slots_table = WebDriverWait(driver, 2).until(
                             EC.presence_of_element_located((By.XPATH, xpath))
                         )
                         print(f"Found 'Upcoming slots' table with XPath: {xpath}")
-                        # Validate table is under "Upcoming slots"
                         is_under_upcoming = driver.execute_script(
                             """
                             let table = arguments[0];
@@ -204,15 +236,7 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                                 }
                                 parent = parent.parentElement;
                             }
-                            // Check if any ancestor contains 'Upcoming slots'
-                            let ancestors = document.evaluate(
-                                ".//h3[text()='Upcoming slots']",
-                                table,
-                                null,
-                                XPathResult.ANY_TYPE,
-                                null
-                            );
-                            return ancestors.iterateNext() === null; // True if no 'Upcoming slots' in ancestors
+                            return false;
                             """,
                             upcoming_slots_table
                         )
@@ -230,20 +254,14 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                     break
             else:
                 print("No 'Upcoming slots' table found after trying all XPaths.")
-                # Save page source for debugging
-                with open(f"page_source_no_table_{username_input}.html", "w", encoding="utf-8") as f:
-                    f.write(driver.page_source)
-                print(f"Page source saved to 'page_source_no_table_{username_input}.html'")
                 upcoming_slots_table = None
 
             if upcoming_slots_table:
-                # Wait for rows with a short timeout
                 try:
                     rows = WebDriverWait(driver, 1).until(
                         EC.presence_of_all_elements_located((By.XPATH, ".//tbody/tr"))
                     ) or []
                     print(f"Found {len(rows)} row(s) in 'Upcoming slots' table")
-                    # Log all rows for debugging
                     for i, row in enumerate(rows):
                         try:
                             date_cell = row.find_element(By.CSS_SELECTOR, "td.cell.c0")
@@ -258,14 +276,14 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                     for row in rows:
                         try:
                             date_cell = row.find_element(By.CSS_SELECTOR, "td.cell.c0")
-                            print(f"Processing row with date cell text: '{date_cell.text}'")  # Debugging
+                            print(f"Processing row with date cell text: '{date_cell.text}'")
 
                             # Extract date
                             try:
                                 date_label = WebDriverWait(date_cell, 1).until(
                                     EC.presence_of_element_located((By.CLASS_NAME, "datelabel"))
                                 ).text.strip()
-                            except (NoSuchElementException, TimeoutException):
+                            except:
                                 date_lines = [line.strip() for line in date_cell.text.split('\n') if line.strip()]
                                 date_label = date_lines[0] if date_lines else ""
                                 print(f"No datelabel found, using raw text: '{date_label}'")
@@ -275,7 +293,7 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                                 time_label = WebDriverWait(date_cell, 1).until(
                                     EC.presence_of_element_located((By.CLASS_NAME, "timelabel"))
                                 ).text.strip()
-                            except (NoSuchElementException, TimeoutException):
+                            except:
                                 time_label = ""
                                 date_lines = [line.strip() for line in date_cell.text.split('\n') if line.strip()]
                                 for line in date_lines:
@@ -288,62 +306,44 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                                 print(f"Skipping row: date_label='{date_label}', time_label='{time_label}'")
                                 continue
 
-                            # Parse the date and classify slot
+                            # Parse and classify slot
                             try:
                                 slot_date = datetime.strptime(date_label, "%A, %d %B %Y")
-                                today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                                if slot_date.date() < today.date():
-                                    # Previous (Freezed) slot
+                                today = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30))).replace(hour=0, minute=0, second=0, microsecond=0)
+                                if slot_date.date() <= today.date():
                                     message = f"There is a freezed slot at this date and time:\nDate: {date_label}\nTime: {time_label}"
                                     print(message)
                                     root.after(0, lambda: messagebox.showwarning("Freezed Slot", message))
                                     return
-                                else:
-                                    # Upcoming slot
-                                    message = f"You already have an upcoming booked slot:\nDate: {date_label}\nTime: {time_label}"
-                                    print(message)
-                                    root.after(0, lambda: messagebox.showinfo("Upcoming Booking", message))
-                                    return
+                                # Future slots: no message, proceed
+                                print(f"Found future slot: {date_label}, {time_label}. Proceeding with booking.")
                             except ValueError as e:
                                 print(f"Error parsing date '{date_label}': {e}. Skipping row.")
                                 continue
                         except (NoSuchElementException, StaleElementReferenceException) as e:
                             print(f"Error processing row: {e}. Skipping.")
                             continue
-                    print("No valid slots found in 'Upcoming slots'. Proceeding with booking.")
+                    print("No freezed slots found in 'Upcoming slots'. Proceeding with booking.")
                 else:
                     print("No rows found in 'Upcoming slots' table. Proceeding with booking.")
             else:
-                print("No 'Upcoming slots' table found. Checking LMS restrictions before proceeding.")
+                print("No 'Upcoming slots' table found. Proceeding with booking.")
 
         except TimeoutException:
             print("Timeout: 'Upcoming slots' table not found within 2 seconds.")
-            # Save page source for debugging
             with open(f"page_source_timeout_{username_input}.html", "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
             print(f"Timeout page source saved to 'page_source_timeout_{username_input}.html'")
         except Exception as e:
             print(f"Unexpected error checking upcoming slots: {e}")
-            # Save page source for debugging
             with open(f"page_source_error_{username_input}.html", "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
             print(f"Error page source saved to 'page_source_error_{username_input}.html'")
 
-        # Re-check LMS restrictions before booking
-        try:
-            booking_blocked = driver.find_element(By.CSS_SELECTOR, "div.studentbookingmessage").text
-            if "You cannot book further appointments" in booking_blocked:
-                print("Booking blocked by LMS")
-                root.after(0, lambda: messagebox.showwarning("Booking Blocked", "Cannot book due to LMS restrictions, likely due to a freezed slot."))
-                return
-        except NoSuchElementException:
-            print("No LMS restriction message found, proceeding with booking.")
-
-        # Wait for slotbookertable to ensure page is ready for booking
+        # Proceed to booking
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
         print("Slot booking table loaded")
 
-        # Continuous refresh until slot is found or deadline reached
         found_slot = False
         attempt = 0
         refresh_interval = 1
@@ -357,9 +357,8 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                 root.after(0, lambda: messagebox.showerror("Failure", f"❌ Slot not found for {day}, {date}, {start_time}-{end_time} by {check_until_time}."))
                 return
 
-            # Refresh scheduler page with 503 error handling
             if not check_503_error(driver, scheduler_url):
-                root.after(0, lambda: messagebox.showerror("Error", f"❌ Failed to load scheduler page due to persistent 503 error"))
+                root.after(0, lambda: messagebox.showerror("Error", "❌ Failed to load scheduler page due to persistent 503 error"))
                 return
 
             WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
@@ -444,7 +443,7 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                     print("Stale element encountered, refreshing...")
                     driver.refresh()
                     if not check_503_error(driver, scheduler_url):
-                        root.after(0, lambda: messagebox.showerror("Error", f"❌ Failed to load scheduler page due to persistent 503 error"))
+                        root.after(0, lambda: messagebox.showerror("Error", "❌ Failed to load scheduler page due to persistent 503 error"))
                         return
                     WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
                     continue
@@ -455,7 +454,6 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
     except TimeoutException as e:
         print(f"Timeout error: {e}")
         root.after(0, lambda: messagebox.showerror("Error", f"❌ Timeout error"))
-        # Save page source for debugging
         if driver:
             with open(f"page_source_timeout_{username_input}.html", "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
