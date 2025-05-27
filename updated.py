@@ -8,11 +8,11 @@ from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import StaleElementReferenceException, NoSuchElementException, TimeoutException, ElementClickInterceptedException
+from selenium.common.exceptions import StaleElementReferenceException, NoSuchElementException, TimeoutException, ElementClickInterceptedException, WebDriverException
 import threading
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import schedule
 try:
     from playsound import playsound
@@ -49,28 +49,48 @@ def check_gpu_availability():
         print("GPUtil not installed. Falling back to CPU.")
         return False, "--disable-gpu"
 
+def check_503_error(driver, url, max_attempts=5, wait_time=2):
+    """Check for 503 error and retry loading the page."""
+    attempts = 0
+    while attempts < max_attempts:
+        try:
+            driver.get(url)
+            if "503 Service Unavailable" in driver.title or "503 Service Unavailable" in driver.page_source:
+                print(f"503 Service Unavailable detected at attempt {attempts + 1}. Refreshing page...")
+                driver.refresh()
+                time.sleep(wait_time)
+                attempts += 1
+                continue
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            print(f"Page loaded successfully: {url}")
+            return True
+        except (TimeoutException, WebDriverException) as e:
+            print(f"Error loading page (attempt {attempts + 1}): {e}. Retrying...")
+            driver.refresh()
+            time.sleep(wait_time)
+            attempts += 1
+    print(f"Failed to load page after {max_attempts} attempts due to 503 error or other issues.")
+    return False
+
 def slot_booking_process(username_input, password_input, day, date, start_time, end_time, scheduler_url, proxy, headless, browser_choice, root, continuous=False, check_until_time=None):
     driver = None
     try:
-        # Check GPU availability
         use_gpu, gpu_arg = check_gpu_availability()
         root.after(0, lambda: status_label.config(text=f"Using {'GPU' if use_gpu else 'CPU'} | Checking for slot..."))
 
-        # Parse check_until_time if provided
         deadline = None
         if check_until_time:
             try:
                 deadline = datetime.strptime(check_until_time, "%H:%M")
                 deadline = datetime.now().replace(hour=deadline.hour, minute=deadline.minute, second=0, microsecond=0)
                 if deadline < datetime.now():
-                    deadline = deadline.replace(day=deadline.day + 1)  # Assume next day if time has passed
+                    deadline = deadline.replace(day=deadline.day + 1)
                 print(f"Will check until {deadline.strftime('%H:%M:%S')}")
             except ValueError:
                 print(f"Invalid check until time format: {check_until_time}")
                 root.after(0, lambda: messagebox.showerror("Error", "Invalid check until time format. Use HH:MM (e.g., 21:30)."))
                 return
 
-        # Set up browser options
         if browser_choice == "Chrome":
             options = ChromeOptions()
             if headless:
@@ -106,15 +126,18 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
         print(f"Running in {browser_choice} {'headless' if headless else 'visible'} mode with {'GPU' if use_gpu else 'CPU'}")
         driver.implicitly_wait(1)
 
-        # Login
+        # Navigate to login page with 503 error handling
+        login_url = "https://lms2.ai.saveetha.in/course/view.php?id=302"
         print("Navigating to login page")
-        driver.get("https://lms2.ai.saveetha.in/course/view.php?id=302")
+        if not check_503_error(driver, login_url):
+            root.after(0, lambda: messagebox.showerror("Error", f"❌ Failed to load login page due to persistent 503 error"))
+            return
+
         WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.NAME, 'username'))).send_keys(username_input)
         driver.find_element(By.NAME, 'password').send_keys(password_input)
         driver.find_element(By.ID, 'loginbtn').click()
         print("Logged in successfully")
 
-        # Parse the date
         try:
             date_obj = datetime.strptime(date.strip(), "%d %m %Y")
             formatted_date = date_obj.strftime("%d %B %Y")
@@ -131,6 +154,195 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
         ]
         print(f"Looking for slot with date in formats: {expected_date_formats}, time: {start_time}-{end_time}")
 
+        # Navigate to scheduler page with 503 error handling
+        if not check_503_error(driver, scheduler_url):
+            root.after(0, lambda: messagebox.showerror("Error", f"❌ Failed to load scheduler page due to persistent 503 error"))
+            return
+
+        # Wait for page to be fully loaded
+        WebDriverWait(driver, 5).until(lambda d: d.execute_script("return document.readyState") == "complete")
+        print("Scheduler page fully loaded")
+
+        # Check for LMS booking restrictions early
+        try:
+            booking_blocked = driver.find_element(By.CSS_SELECTOR, "div.studentbookingmessage").text
+            if "You cannot book further appointments" in booking_blocked:
+                print("Booking blocked by LMS")
+                root.after(0, lambda: messagebox.showwarning("Booking Blocked", "Cannot book due to LMS restrictions, likely due to a freezed slot."))
+            else:
+                print(f"LMS message found but not blocking: {booking_blocked}")
+        except NoSuchElementException:
+            print("No LMS restriction message found")
+            pass
+
+        # Check for existing booked slot in "Upcoming slots" only
+        try:
+            print("Checking for 'Upcoming slots' section")
+            # Try multiple XPaths to locate the "Upcoming slots" table
+            xpaths = [
+                "//div[@role='main']//h3[text()='Upcoming slots']/following-sibling::div[1]//table[@class='generaltable']",
+                "//h3[text()='Upcoming slots']/following-sibling::div[contains(@class, 'table-responsive')]//table[@class='generaltable']",
+                "//h3[text()='Upcoming slots']/following::table[@class='generaltable'][1]"
+            ]
+            upcoming_slots_table = None
+            for xpath in xpaths:
+                for _ in range(2):  # Retry twice per XPath
+                    try:
+                        upcoming_slots_table = WebDriverWait(driver, 2).until(
+                            EC.presence_of_element_located((By.XPATH, xpath))
+                        )
+                        print(f"Found 'Upcoming slots' table with XPath: {xpath}")
+                        # Validate table is under "Upcoming slots"
+                        is_under_upcoming = driver.execute_script(
+                            """
+                            let table = arguments[0];
+                            let parent = table;
+                            while (parent) {
+                                let h3 = parent.previousElementSibling;
+                                if (h3 && h3.tagName.toLowerCase() === 'h3' && h3.textContent.trim() === 'Upcoming slots') {
+                                    return true;
+                                }
+                                parent = parent.parentElement;
+                            }
+                            // Check if any ancestor contains 'Upcoming slots'
+                            let ancestors = document.evaluate(
+                                ".//h3[text()='Upcoming slots']",
+                                table,
+                                null,
+                                XPathResult.ANY_TYPE,
+                                null
+                            );
+                            return ancestors.iterateNext() === null; // True if no 'Upcoming slots' in ancestors
+                            """,
+                            upcoming_slots_table
+                        )
+                        if is_under_upcoming:
+                            print("Confirmed table is under 'Upcoming slots'")
+                            break
+                        else:
+                            print(f"Table not under 'Upcoming slots' for XPath: {xpath}, retrying...")
+                            upcoming_slots_table = None
+                            time.sleep(0.5)
+                    except TimeoutException:
+                        print(f"Retrying to locate 'Upcoming slots' table with XPath: {xpath}")
+                        time.sleep(0.5)
+                if upcoming_slots_table:
+                    break
+            else:
+                print("No 'Upcoming slots' table found after trying all XPaths.")
+                # Save page source for debugging
+                with open(f"page_source_no_table_{username_input}.html", "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                print(f"Page source saved to 'page_source_no_table_{username_input}.html'")
+                upcoming_slots_table = None
+
+            if upcoming_slots_table:
+                # Wait for rows with a short timeout
+                try:
+                    rows = WebDriverWait(driver, 1).until(
+                        EC.presence_of_all_elements_located((By.XPATH, ".//tbody/tr"))
+                    ) or []
+                    print(f"Found {len(rows)} row(s) in 'Upcoming slots' table")
+                    # Log all rows for debugging
+                    for i, row in enumerate(rows):
+                        try:
+                            date_cell = row.find_element(By.CSS_SELECTOR, "td.cell.c0")
+                            print(f"Row {i+1} date cell text: '{date_cell.text}'")
+                        except:
+                            print(f"Row {i+1} failed to extract date cell text")
+                except TimeoutException:
+                    rows = []
+                    print("No rows found in 'Upcoming slots' table within 1 second")
+
+                if rows:
+                    for row in rows:
+                        try:
+                            date_cell = row.find_element(By.CSS_SELECTOR, "td.cell.c0")
+                            print(f"Processing row with date cell text: '{date_cell.text}'")  # Debugging
+
+                            # Extract date
+                            try:
+                                date_label = WebDriverWait(date_cell, 1).until(
+                                    EC.presence_of_element_located((By.CLASS_NAME, "datelabel"))
+                                ).text.strip()
+                            except (NoSuchElementException, TimeoutException):
+                                date_lines = [line.strip() for line in date_cell.text.split('\n') if line.strip()]
+                                date_label = date_lines[0] if date_lines else ""
+                                print(f"No datelabel found, using raw text: '{date_label}'")
+
+                            # Extract time
+                            try:
+                                time_label = WebDriverWait(date_cell, 1).until(
+                                    EC.presence_of_element_located((By.CLASS_NAME, "timelabel"))
+                                ).text.strip()
+                            except (NoSuchElementException, TimeoutException):
+                                time_label = ""
+                                date_lines = [line.strip() for line in date_cell.text.split('\n') if line.strip()]
+                                for line in date_lines:
+                                    if "AM" in line or "PM" in line:
+                                        time_label = line
+                                        break
+                                print(f"No timelabel found, using raw text: '{time_label}'")
+
+                            if not date_label or not time_label:
+                                print(f"Skipping row: date_label='{date_label}', time_label='{time_label}'")
+                                continue
+
+                            # Parse the date and classify slot
+                            try:
+                                slot_date = datetime.strptime(date_label, "%A, %d %B %Y")
+                                today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                                if slot_date.date() < today.date():
+                                    # Previous (Freezed) slot
+                                    message = f"There is a freezed slot at this date and time:\nDate: {date_label}\nTime: {time_label}"
+                                    print(message)
+                                    root.after(0, lambda: messagebox.showwarning("Freezed Slot", message))
+                                    return
+                                else:
+                                    # Upcoming slot
+                                    message = f"You already have an upcoming booked slot:\nDate: {date_label}\nTime: {time_label}"
+                                    print(message)
+                                    root.after(0, lambda: messagebox.showinfo("Upcoming Booking", message))
+                                    return
+                            except ValueError as e:
+                                print(f"Error parsing date '{date_label}': {e}. Skipping row.")
+                                continue
+                        except (NoSuchElementException, StaleElementReferenceException) as e:
+                            print(f"Error processing row: {e}. Skipping.")
+                            continue
+                    print("No valid slots found in 'Upcoming slots'. Proceeding with booking.")
+                else:
+                    print("No rows found in 'Upcoming slots' table. Proceeding with booking.")
+            else:
+                print("No 'Upcoming slots' table found. Checking LMS restrictions before proceeding.")
+
+        except TimeoutException:
+            print("Timeout: 'Upcoming slots' table not found within 2 seconds.")
+            # Save page source for debugging
+            with open(f"page_source_timeout_{username_input}.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            print(f"Timeout page source saved to 'page_source_timeout_{username_input}.html'")
+        except Exception as e:
+            print(f"Unexpected error checking upcoming slots: {e}")
+            # Save page source for debugging
+            with open(f"page_source_error_{username_input}.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            print(f"Error page source saved to 'page_source_error_{username_input}.html'")
+
+        # Re-check LMS restrictions before booking
+        try:
+            booking_blocked = driver.find_element(By.CSS_SELECTOR, "div.studentbookingmessage").text
+            if "You cannot book further appointments" in booking_blocked:
+                print("Booking blocked by LMS")
+                root.after(0, lambda: messagebox.showwarning("Booking Blocked", "Cannot book due to LMS restrictions, likely due to a freezed slot."))
+                return
+        except NoSuchElementException:
+            print("No LMS restriction message found, proceeding with booking.")
+
+        # Wait for slotbookertable to ensure page is ready for booking
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
+        print("Slot booking table loaded")
+
         # Continuous refresh until slot is found or deadline reached
         found_slot = False
         attempt = 0
@@ -140,14 +352,16 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
             attempt += 1
             print(f"Attempt {attempt} to find and book slot")
 
-            # Check deadline
             if deadline and datetime.now() > deadline:
                 print(f"Deadline {deadline.strftime('%H:%M:%S')} reached. Slot not found.")
                 root.after(0, lambda: messagebox.showerror("Failure", f"❌ Slot not found for {day}, {date}, {start_time}-{end_time} by {check_until_time}."))
                 return
 
-            # Navigate to scheduler
-            driver.get(scheduler_url)
+            # Refresh scheduler page with 503 error handling
+            if not check_503_error(driver, scheduler_url):
+                root.after(0, lambda: messagebox.showerror("Error", f"❌ Failed to load scheduler page due to persistent 503 error"))
+                return
+
             WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
             print("Scheduler page loaded")
 
@@ -164,7 +378,6 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                     row = all_rows[i]
                     row_text = row.text.strip()
 
-                    # Identify date header
                     date_header_match = re.search(r'\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b', row_text)
                     if date_header_match:
                         current_date_header_text = date_header_match.group(0).strip()
@@ -230,6 +443,9 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                 except StaleElementReferenceException:
                     print("Stale element encountered, refreshing...")
                     driver.refresh()
+                    if not check_503_error(driver, scheduler_url):
+                        root.after(0, lambda: messagebox.showerror("Error", f"❌ Failed to load scheduler page due to persistent 503 error"))
+                        return
                     WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, 'slotbookertable')))
                     continue
 
@@ -239,6 +455,11 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
     except TimeoutException as e:
         print(f"Timeout error: {e}")
         root.after(0, lambda: messagebox.showerror("Error", f"❌ Timeout error"))
+        # Save page source for debugging
+        if driver:
+            with open(f"page_source_timeout_{username_input}.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            print(f"Timeout page source saved to 'page_source_timeout_{username_input}.html'")
     except NoSuchElementException as e:
         print(f"Element not found: {e}")
         root.after(0, lambda: messagebox.showerror("Error", f"❌ Element not found"))
@@ -247,7 +468,7 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
         root.after(0, lambda: messagebox.showerror("Error", f"❌ Unexpected error"))
     finally:
         if driver:
-            print("Closing browser gracefully")
+            print("Shutting down browser")
             if driver in active_drivers:
                 active_drivers.remove(driver)
             driver.quit()
@@ -384,6 +605,29 @@ def on_date_selected(event=None):
     except ValueError:
         combo_day.set("")
 
+def get_end_time(schedule_id, start_time):
+    """Calculate the end time based on the schedule ID and start time."""
+    try:
+        start_dt = datetime.strptime(start_time, "%I:%M %p")
+        if schedule_id in ["1731", "1851"]:
+            start_times = ["8:00 AM", "10:00 AM", "1:00 PM", "3:00 PM"]
+            end_times = ["10:00 AM", "12:00 PM", "3:00 PM", "4:30 PM"]
+            if start_time in start_times:
+                return end_times[start_times.index(start_time)]
+        elif schedule_id == "1852":
+            start_times = ["8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "1:00 PM", "2:00 PM", "3:00 PM"]
+            if start_time in start_times:
+                end_dt = start_dt + timedelta(hours=1)
+                return end_dt.strftime("%I:%M %p")
+        elif schedule_id == "1611":
+            if (start_time in venue_time_slots["1611"] and 
+                start_time != venue_time_slots["1611"][-1]):  # Exclude the last slot
+                end_dt = start_dt + timedelta(minutes=15)
+                return end_dt.strftime("%I:%M %p")
+        return ""
+    except ValueError:
+        return ""
+
 def on_schedule_selected(event=None):
     schedule_id = combo_schedule.get()
     times = venue_time_slots.get(schedule_id, [])
@@ -391,101 +635,131 @@ def on_schedule_selected(event=None):
     entry_end_time['values'] = times
     if times:
         entry_start_time.set(times[0])
-        entry_end_time.set(times[-1])
+        entry_end_time.set(get_end_time(schedule_id, times[0]))
     else:
         entry_start_time.set("")
         entry_end_time.set("")
 
-# --- GUI Layout ---
+def on_start_time_selected(event=None):
+    schedule_id = combo_schedule.get()
+    start_time = entry_start_time.get()
+    end_time = get_end_time(schedule_id, start_time)
+    entry_end_time.set(end_time)
+
+# --- GUI Layout with Scrollable Canvas ---
 root = tk.Tk()
 root.title("Enhanced Slot Booking Bot - Saveetha LMS")
-root.geometry("500x950")  # Increased height for new field
+root.geometry("500x600")
 
-# Time slots for each venue
+canvas = tk.Canvas(root)
+scrollbar = ttk.Scrollbar(root, orient="vertical", command=canvas.yview)
+scrollable_frame = ttk.Frame(canvas)
+
+scrollable_frame.bind(
+    "<Configure>",
+    lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+)
+canvas.configure(yscrollcommand=scrollbar.set)
+
+scrollbar.pack(side="right", fill="y")
+canvas.pack(side="left", fill="both", expand=True)
+
+canvas_frame = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+def on_mouse_wheel(event):
+    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+canvas.bind_all("<MouseWheel>", on_mouse_wheel)
+canvas.bind_all("<Button-4>", lambda event: canvas.yview_scroll(-1, "units"))
+canvas.bind_all("<Button-5>", lambda event: canvas.yview_scroll(1, "units"))
+
 venue_time_slots = {
-    "1731": ["8:00 AM", "10:00 AM", "12:00 PM", "1:00 PM", "3:00 PM", "4:30 PM"],
-    "1851": ["8:00 AM", "10:00 AM", "12:00 PM", "1:00 PM", "3:00 PM", "4:30 PM"],
-    "1852": ["8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "12:00 PM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"],
-    "1611": ["8:00 AM", "8:15 AM", "8:30 AM", "8:45 AM", "9:00 AM", "9:15 AM", "9:30 AM", "9:45 AM", "10:00 AM", "10:15 AM", "10:30 AM", "10:45 AM", "11:00 AM", "11:15 AM", "11:30 AM", "11:45 AM", "12:00 PM", "1:00 PM", "1:15 PM", "1:30 PM", "1:45 PM", "2:00 PM", "2:15 PM", "2:30 PM", "2:45 PM", "3:00 PM", "3:15 PM", "3:30 PM", "3:45 PM", "4:00 PM", "4:15 PM", "4:30 PM"]
+    "1731": ["8:00 AM", "10:00 AM", "1:00 PM", "3:00 PM"],
+    "1851": ["8:00 AM", "10:00 AM", "1:00 PM", "3:00 PM"],
+    "1852": ["8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "1:00 PM", "2:00 PM", "3:00 PM"],
+    "1611": [f"{h}:{m:02d} {'AM' if h < 12 else 'PM'}" for h in range(8, 12) for m in range(0, 60, 15)] +
+            [f"{h}:{m:02d} {'PM'}" for h in range(1, 4) for m in range(0, 60, 15)] +
+            ["4:00 PM", "4:15 PM"]
 }
 
-ttk.Label(root, text="Username").pack(pady=5)
-entry_username = ttk.Entry(root, width=30)
+ttk.Label(scrollable_frame, text="Username").pack(pady=5)
+entry_username = ttk.Entry(scrollable_frame, width=30)
 entry_username.pack()
 
-ttk.Label(root, text="Password").pack(pady=5)
-entry_password = ttk.Entry(root, width=30, show="*")
+ttk.Label(scrollable_frame, text="Password").pack(pady=5)
+entry_password = ttk.Entry(scrollable_frame, width=30, show="*")
 entry_password.pack()
 
-ttk.Label(root, text="Select Schedule").pack(pady=5)
-combo_schedule = ttk.Combobox(root, values=["1731", "1851", "1852", "1611"], state="readonly")
+ttk.Label(scrollable_frame, text="Select Schedule").pack(pady=5)
+combo_schedule = ttk.Combobox(scrollable_frame, values=["1731", "1851", "1852", "1611"], state="readonly")
 combo_schedule.pack()
 combo_schedule.set("1731")
 
-ttk.Label(root, text="Select Browser").pack(pady=5)
-combo_browser = ttk.Combobox(root, values=["Chrome", "Firefox", "Edge"], state="readonly")
+ttk.Label(scrollable_frame, text="Select Browser").pack(pady=5)
+combo_browser = ttk.Combobox(scrollable_frame, values=["Chrome", "Firefox", "Edge"], state="readonly")
 combo_browser.pack()
 combo_browser.set("Chrome")
 
-ttk.Label(root, text="Proxies (comma-separated, e.g., http://proxy1:port,http://proxy2:port)").pack(pady=5)
-entry_proxies = ttk.Entry(root, width=50)
+ttk.Label(scrollable_frame, text="Proxies (comma-separated, e.g., http://proxy1:port,http://proxy2:port)").pack(pady=5)
+entry_proxies = ttk.Entry(scrollable_frame, width=50)
 entry_proxies.pack()
 
-ttk.Label(root, text="Schedule Time (HH:MM, e.g., 21:03)").pack(pady=5)
-entry_schedule_time = ttk.Entry(root, width=30)
+ttk.Label(scrollable_frame, text="Schedule Time (HH:MM, e.g., 21:03)").pack(pady=5)
+entry_schedule_time = ttk.Entry(scrollable_frame, width=30)
 entry_schedule_time.pack()
 
-ttk.Label(root, text="Check Until Time (HH:MM, e.g., 21:30, optional)").pack(pady=5)
-entry_check_until = ttk.Entry(root, width=30)
+ttk.Label(scrollable_frame, text="Check Until Time (HH:MM, e.g., 21:30, optional)").pack(pady=5)
+entry_check_until = ttk.Entry(scrollable_frame, width=30)
 entry_check_until.pack()
 
-ttk.Label(root, text="Date (Select or Type, e.g., 16 May 2025)").pack(pady=5)
-entry_date = DateEntry(root, width=30, date_pattern="dd mm yyyy", state="normal")
+ttk.Label(scrollable_frame, text="Date (Select or Type, e.g., 16 May 2025)").pack(pady=5)
+entry_date = DateEntry(scrollable_frame, width=30, date_pattern="dd mm yyyy", state="normal")
 entry_date.pack()
 entry_date.bind("<<DateEntrySelected>>", on_date_selected)
 entry_date.bind("<FocusOut>", on_date_selected)
 
-ttk.Label(root, text="Day (Auto-filled)").pack(pady=5)
+ttk.Label(scrollable_frame, text="Day (Auto-filled)").pack(pady=5)
 days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-combo_day = ttk.Combobox(root, values=days, state="readonly")
+combo_day = ttk.Combobox(scrollable_frame, values=days, state="readonly")
 combo_day.pack()
 
-ttk.Label(root, text="Start Time").pack(pady=5)
-entry_start_time = ttk.Combobox(root, values=[], state="readonly", width=30)
+ttk.Label(scrollable_frame, text="Start Time").pack(pady=5)
+entry_start_time = ttk.Combobox(scrollable_frame, values=[], state="readonly", width=30)
 entry_start_time.pack()
+entry_start_time.bind("<<ComboboxSelected>>", on_start_time_selected)
 
-ttk.Label(root, text="End Time").pack(pady=5)
-entry_end_time = ttk.Combobox(root, values=[], state="readonly", width=30)
+ttk.Label(scrollable_frame, text="End Time").pack(pady=5)
+entry_end_time = ttk.Combobox(scrollable_frame, values=[], state="readonly", width=30)
 entry_end_time.pack()
 
-button_add_slot = ttk.Button(root, text="Add Slot", command=add_slot)
+button_add_slot = ttk.Button(scrollable_frame, text="Add Slot", command=add_slot)
 button_add_slot.pack(pady=5)
 
-button_remove_slot = ttk.Button(root, text="Remove Selected Slot", command=remove_slot)
+button_remove_slot = ttk.Button(scrollable_frame, text="Remove Selected Slot", command=remove_slot)
 button_remove_slot.pack(pady=5)
 
-frame_slots = ttk.Frame(root)
+frame_slots = ttk.Frame(scrollable_frame)
 frame_slots.pack(pady=10)
 listbox_slots = tk.Listbox(frame_slots, height=5, width=60)
-scrollbar = ttk.Scrollbar(frame_slots, orient="vertical", command=listbox_slots.yview)
-listbox_slots.config(yscrollcommand=scrollbar.set)
+scrollbar_slots = ttk.Scrollbar(frame_slots, orient="vertical", command=listbox_slots.yview)
+listbox_slots.config(yscrollcommand=scrollbar_slots.set)
 listbox_slots.pack(side="left", fill="both", expand=True)
-scrollbar.pack(side="right", fill="y")
+scrollbar_slots.pack(side="right", fill="y")
 
 headless_var = tk.BooleanVar()
-check_headless = ttk.Checkbutton(root, text="Run Headless (Continuous Refresh)", variable=headless_var)
+check_headless = ttk.Checkbutton(scrollable_frame, text="Run Headless (Continuous Refresh)", variable=headless_var)
 check_headless.pack(pady=10)
 
-status_label = ttk.Label(root, text="Status: Idle")
+status_label = ttk.Label(scrollable_frame, text="Status: Idle")
 status_label.pack(pady=5)
 
-button_book = ttk.Button(root, text="Book Slots Now", command=lambda: run_booking(continuous=True))
+button_book = ttk.Button(scrollable_frame, text="Book Slots Now", command=lambda: run_booking(continuous=True))
 button_book.pack(pady=10)
 
-button_schedule = ttk.Button(root, text="Schedule Booking", command=schedule_booking)
+button_schedule = ttk.Button(scrollable_frame, text="Schedule Booking", command=schedule_booking)
 button_schedule.pack(pady=10)
 
-button_stop = ttk.Button(root, text="Stop Process", command=stop_process)
+button_stop = ttk.Button(scrollable_frame, text="Stop Process", command=stop_process)
 button_stop.pack(pady=10)
 
 combo_schedule.bind("<<ComboboxSelected>>", on_schedule_selected)
