@@ -669,7 +669,7 @@ entry_check_until = ttk.Entry(root, width=30)
 entry_check_until.pack()
 
 ttk.Label(root, text="Date (Select or Type, e.g., 16 May 2025)").pack(pady=5)
-entry_date = DateEntry(root, width=30, date_pattern="dd mm %Y", state="normal")
+entry_date = DateEntry(root, width=30, date_pattern="dd mm Y", state="normal")
 entry_date.pack()
 entry_date.bind("<<DateEntrySelected>>", on_date_selected)
 entry_date.bind("<FocusOut>", on_date_selected)
