@@ -13,6 +13,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import StaleElementReferenceException, NoSuchElementException, TimeoutException, ElementClickInterceptedException
+import requests
 try:
     from playsound import playsound
     SOUND_AVAILABLE = True
@@ -65,6 +66,21 @@ urls = {
     "1852": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=37641",
     "1611": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36137"
 }
+
+# Check LMS connectivity
+def check_lms_connectivity():
+    lms_url = "https://lms2.ai.saveetha.in/"
+    try:
+        response = requests.get(lms_url, timeout=5)
+        if response.status_code == 200:
+            st.success("LMS URL is accessible.")
+            return True
+        else:
+            st.error(f"LMS URL returned status code: {response.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to connect to LMS URL: {e}")
+        return False
 
 def check_gpu_availability():
     if GPU_AVAILABLE:
@@ -128,7 +144,11 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
             options.add_argument("--blink-settings=imagesEnabled=false")
             options.add_argument("--page-load-strategy=eager")
             options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
-            driver = webdriver.Chrome(options=options)
+            try:
+                driver = webdriver.Chrome(options=options)
+            except Exception as e:
+                st.error(f"Failed to initialize Chrome driver: {e}")
+                return
         elif browser_choice == "Firefox":
             options = FirefoxOptions()
             options.add_argument("--headless")
@@ -138,7 +158,11 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                 options.set_preference("network.proxy.http_port", int(proxy.split(":")[1]))
             options.set_preference("permissions.default.image", 2)
             options.set_preference("dom.ipc.processCount", 8)
-            driver = webdriver.Firefox(options=options)
+            try:
+                driver = webdriver.Firefox(options=options)
+            except Exception as e:
+                st.error(f"Failed to initialize Firefox driver: {e}")
+                return
         elif browser_choice == "Edge":
             options = EdgeOptions()
             options.add_argument("--headless")
@@ -146,7 +170,11 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
             options.add_argument("--window-size=1280,720")
             options.add_argument("--blink-settings=imagesEnabled=false")
             options.add_argument("--page-load-strategy=eager")
-            driver = webdriver.Edge(options=options)
+            try:
+                driver = webdriver.Edge(options=options)
+            except Exception as e:
+                st.error(f"Failed to initialize Edge driver: {e}")
+                return
         else:
             raise ValueError("Unsupported browser")
 
@@ -373,7 +401,7 @@ def run_booking(continuous=False):
     username = st.session_state.username
     password = st.session_state.password
     choice = st.session_state.schedule
-    browser_choice = st.session_state.browser
+    browser_choice = "Chrome"  # Force Chrome for Streamlit Cloud compatibility
     headless_mode = st.session_state.headless
     proxies = st.session_state.proxies.split(",") if st.session_state.proxies else []
     check_until_time = st.session_state.check_until or None
@@ -383,6 +411,9 @@ def run_booking(continuous=False):
         return
     if not slot_list:
         st.error("Please add at least one slot to book.")
+        return
+    if not check_lms_connectivity():
+        st.error("Cannot proceed with booking due to LMS connectivity issues.")
         return
 
     scheduler_url = urls[choice]
@@ -434,8 +465,6 @@ if 'day' not in st.session_state:
     st.session_state.day = ""
 if 'schedule' not in st.session_state:
     st.session_state.schedule = list(venue_details.keys())[0]
-if 'browser' not in st.session_state:
-    st.session_state.browser = "Chrome"
 if 'proxies' not in st.session_state:
     st.session_state.proxies = ""
 if 'schedule_time' not in st.session_state:
@@ -447,26 +476,27 @@ if 'headless' not in st.session_state:
 if 'date_input' not in st.session_state:
     st.session_state.date_input = datetime.today().strftime("%Y-%m-%d")
 
+# Credentials
 st.subheader("Credentials")
-username_input = st.text_input("Username", value=st.session_state.username, key="username_input")
-password_input = st.text_input("Password", type="password", value=st.session_state.password, key="password_input")
-st.session_state.username = username_input
-st.session_state.password = password_input
+username = st.text_input("Username", value=st.session_state.username, key="username_input")
+password = st.text_input("Password", type="password", value=st.session_state.password, key="password_input")
+st.session_state.username = username
+st.session_state.password = password
 
+# Configuration
 st.subheader("Configuration")
-schedule_input = st.selectbox("Select Schedule", list(venue_details.keys()), index=list(venue_details.keys()).index(st.session_state.schedule), key="schedule_input")
-browser_input = st.selectbox("Select Browser", ["Chrome", "Firefox", "Edge"], index=["Chrome", "Firefox", "Edge"].index(st.session_state.browser), key="browser_input")
-proxies_input = st.text_input("Proxies (comma-separated, e.g., http://proxy1:port,http://proxy2:port)", value=st.session_state.proxies, key="proxies_input")
-schedule_time_input = st.text_input("Schedule Time (HH:MM, e.g., 21:03)", value=st.session_state.schedule_time, key="schedule_time_input")
-check_until_input = st.text_input("Check Until Time (HH:MM, e.g., 21:30, optional)", value=st.session_state.check_until, key="check_until_input")
-headless_input = st.checkbox("Run Headless (Continuous Refresh)", value=st.session_state.headless, key="headless_input")
-st.session_state.schedule = schedule_input
-st.session_state.browser = browser_input
-st.session_state.proxies = proxies_input
-st.session_state.schedule_time = schedule_time_input
-st.session_state.check_until = check_until_input
-st.session_state.headless = headless_input
+schedule = st.selectbox("Select Schedule", list(venue_details.keys()), index=list(venue_details.keys()).index(st.session_state.schedule), key="schedule_input")
+proxies = st.text_input("Proxies (comma-separated, e.g., http://proxy1:port,http://proxy2:port)", value=st.session_state.proxies, key="proxies_input")
+schedule_time = st.text_input("Schedule Time (HH:MM, e.g., 21:03)", value=st.session_state.schedule_time, key="schedule_time_input")
+check_until = st.text_input("Check Until Time (HH:MM, e.g., 21:30, optional)", value=st.session_state.check_until, key="check_until_input")
+headless = st.checkbox("Run Headless (Continuous Refresh)", value=st.session_state.headless, key="headless_input")
+st.session_state.schedule = schedule
+st.session_state.proxies = proxies
+st.session_state.schedule_time = schedule_time
+st.session_state.check_until = check_until
+st.session_state.headless = headless
 
+# Slot Details
 st.subheader("Slot Details")
 date_input = st.date_input("Date", min_value=datetime.today(), value=datetime.strptime(st.session_state.date_input, "%Y-%m-%d"), key="date_input_field")
 st.session_state.date_input = date_input.strftime("%Y-%m-%d")
@@ -495,8 +525,8 @@ if st.session_state.schedule in venue_details:
             break_start_dt, break_end_dt
         )
 
-start_time_input = st.selectbox("Start Time", st.session_state.start_time_options, key="start_time_input")
-st.session_state.start_time = start_time_input
+start_time = st.selectbox("Start Time", st.session_state.start_time_options, key="start_time_input")
+st.session_state.start_time = start_time
 if st.session_state.start_time and st.session_state.schedule in venue_details:
     config = venue_details[st.session_state.schedule]
     try:
@@ -513,6 +543,7 @@ st.text_input("End Time", value=st.session_state.end_time, disabled=True, key="e
 if st.button("Add Slot", key="add_slot"):
     add_slot()
 
+# Selected Slots
 st.subheader("Selected Slots")
 for i, slot in enumerate(st.session_state.slots):
     col1, col2 = st.columns([4, 1])
@@ -520,6 +551,7 @@ for i, slot in enumerate(st.session_state.slots):
     if col2.button("Remove", key=f"remove_{i}"):
         remove_slot(i)
 
+# Actions
 st.subheader("Actions")
 col1, col2, col3 = st.columns(3)
 if col1.button("Book Slots Now", key="book_now"):
