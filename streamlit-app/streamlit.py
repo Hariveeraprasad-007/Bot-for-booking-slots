@@ -1,4 +1,4 @@
-
+```python
 import streamlit as st
 import threading
 import time
@@ -416,7 +416,6 @@ def schedule_booking():
         st.error("Invalid time format. Use HH:MM (e.g., 21:03).")
 
 # Streamlit UI
-# Streamlit UI
 st.title("Enhanced Slot Booking Bot - Saveetha LMS")
 
 # Initialize session state defaults
@@ -456,15 +455,22 @@ st.session_state.username = username_input
 st.session_state.password = password_input
 
 st.subheader("Configuration")
-st.session_state.schedule = st.selectbox("Select Schedule", list(venue_details.keys()), key="schedule")
-st.session_state.browser = st.selectbox("Select Browser", ["Chrome", "Firefox", "Edge"], key="browser")
-st.session_state.proxies = st.text_input("Proxies (comma-separated, e.g., http://proxy1:port,http://proxy2:port)", key="proxies")
-st.session_state.schedule_time = st.text_input("Schedule Time (HH:MM, e.g., 21:03)", key="schedule_time")
-st.session_state.check_until = st.text_input("Check Until Time (HH:MM, e.g., 21:30, optional)", key="check_until")
-st.session_state.headless = st.checkbox("Run Headless (Continuous Refresh)", value=True, key="headless")
+schedule_input = st.selectbox("Select Schedule", list(venue_details.keys()), index=list(venue_details.keys()).index(st.session_state.schedule), key="schedule")
+browser_input = st.selectbox("Select Browser", ["Chrome", "Firefox", "Edge"], index=["Chrome", "Firefox", "Edge"].index(st.session_state.browser), key="browser")
+proxies_input = st.text_input("Proxies (comma-separated, e.g., http://proxy1:port,http://proxy2:port)", value=st.session_state.proxies, key="proxies")
+schedule_time_input = st.text_input("Schedule Time (HH:MM, e.g., 21:03)", value=st.session_state.schedule_time, key="schedule_time")
+check_until_input = st.text_input("Check Until Time (HH:MM, e.g., 21:30, optional)", value=st.session_state.check_until, key="check_until")
+headless_input = st.checkbox("Run Headless (Continuous Refresh)", value=st.session_state.headless, key="headless")
+st.session_state.schedule = schedule_input
+st.session_state.browser = browser_input
+st.session_state.proxies = proxies_input
+st.session_state.schedule_time = schedule_time_input
+st.session_state.check_until = check_until_input
+st.session_state.headless = headless_input
 
 st.subheader("Slot Details")
-st.session_state.date_input = st.date_input("Date", min_value=datetime.today(), key="date_input").strftime("%Y-%m-%d")
+date_input = st.date_input("Date", min_value=datetime.today(), value=datetime.strptime(st.session_state.date_input, "%Y-%m-%d"), key="date_input")
+st.session_state.date_input = date_input.strftime("%Y-%m-%d")
 try:
     date_obj = datetime.strptime(st.session_state.date_input, "%Y-%m-%d")
     st.session_state.day = date_obj.strftime("%A")
@@ -490,7 +496,8 @@ if st.session_state.schedule in venue_details:
             break_start_dt, break_end_dt
         )
 
-st.session_state.start_time = st.selectbox("Start Time", st.session_state.start_time_options, key="start_time")
+start_time_input = st.selectbox("Start Time", st.session_state.start_time_options, key="start_time")
+st.session_state.start_time = start_time_input
 if st.session_state.start_time and st.session_state.schedule in venue_details:
     config = venue_details[st.session_state.schedule]
     try:
@@ -524,3 +531,4 @@ if col3.button("Stop Process", key="stop_process"):
     stop_process()
 
 st.write(st.session_state.status)
+```
