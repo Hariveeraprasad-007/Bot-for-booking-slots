@@ -62,13 +62,11 @@ def check_lms_connectivity(max_retries=3, delay=2):
     for attempt in range(max_retries):
         try:
             response = requests.get(lms_url, timeout=5)
-            if response.status_code == 200:
-                # Check if login page is accessible
-                if "login" in response.text.lower():
-                    st.session_state.status = f"LMS login page is accessible (Attempt {attempt + 1}/{max_retries})."
-                    return True
-                else:
-                    st.session_state.status = f"LMS URL accessible but login page not found (Attempt {attempt + 1}/{max_retries})."
+            if response.status_code == 200 and "login" in response.text.lower():
+                st.session_state.status = f"LMS login page is accessible (Attempt {attempt + 1}/{max_retries})."
+                return True
+            elif response.status_code == 200:
+                st.session_state.status = f"LMS URL accessible but login page not found (Attempt {attempt + 1}/{max_retries})."
             else:
                 st.session_state.status = f"LMS URL returned status code: {response.status_code} (Attempt {attempt + 1}/{max_retries})."
         except requests.exceptions.RequestException as e:
@@ -77,6 +75,13 @@ def check_lms_connectivity(max_retries=3, delay=2):
             time.sleep(delay)
     st.session_state.status = "LMS URL is not accessible after maximum retries."
     return False
+
+def normalize_time(time_str):
+    try:
+        dt = parser.parse(time_str, fuzzy=True)
+        return dt.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM', ' AM').replace('PM', ' PM')
+    except ValueError:
+        return time_str
 
 def _generate_interval_start_times(overall_start_dt, overall_end_dt, interval_m, break_start_dt, break_end_dt):
     times = []
@@ -88,7 +93,7 @@ def _generate_interval_start_times(overall_start_dt, overall_end_dt, interval_m,
                 is_during_break = True
         
         if not is_during_break:
-            times.append(current_time.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM',' AM').replace('PM',' PM'))
+            times.append(current_time.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM', ' AM').replace('PM', ' PM'))
         
         current_time += timedelta(minutes=interval_m)
         
@@ -98,7 +103,6 @@ def _generate_interval_start_times(overall_start_dt, overall_end_dt, interval_m,
     return times
 
 def slot_booking_process(username, password, day, date, start_time, end_time, scheduler_url, proxy, headless, continuous=False, check_until_time=None):
-    driver = None
     try:
         st.session_state.status = "Initializing browser..."
 
@@ -117,7 +121,7 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
             options.add_argument(f'--proxy-server={proxy}')
         elif proxy:
             st.warning(f"Invalid proxy format: {proxy}. Proceeding without proxy.")
-            st.session_state.status = f"Warning: Invalid proxy format: {proxy}"
+            st.session_state.status = f"Warning: Invalid proxy format: {proxy}. Proceeding without proxy."
 
         with webdriver.Chrome(service=webdriver.chrome.service.Service(ChromeDriverManager().install()), options=options) as driver:
             st.session_state.status = "Logging in..."
@@ -139,16 +143,9 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
                 date_obj = datetime.strptime(date.strip(), "%d %m %Y")
                 formatted_date_for_comparison = date_obj.strftime("%A, %d %B %Y")
             except ValueError:
-                st.error(f"Invalid date format: {date}")
+                st.error(f"Invalid date format: {date}. Expected format: DD MM YYYY")
                 st.session_state.status = f"Error: Invalid date format provided."
                 return
-
-            def normalize_time(time_str):
-                try:
-                    dt = parser.parse(time_str, fuzzy=True)
-                    return dt.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM',' AM').replace('PM',' PM')
-                except ValueError:
-                    return time_str
 
             normalized_start_time = normalize_time(start_time)
             normalized_end_time = normalize_time(end_time)
@@ -224,7 +221,7 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
                             current_date_in_table = date_cell_text
 
                         try:
-                            parsed_table_date = datetime.strptime(current_date_in_table, "%A, %d %B %Y")
+                            parsed_table_date = parser.parse(current_date_in_table)
                         except ValueError:
                             continue
 
@@ -254,7 +251,7 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
                                                 return
                                             except TimeoutException:
                                                 try:
-                                                    WebDriverWait(driver, 2, poll_frequency=0.1).until(EC.presence_of_element_located((By.XPATH, f"//tr[td[contains(text(), '{formatted_date_for_comparison}')]][td[contains(text(), '{start_time}')] and td[contains(text(), '{end_time}')]]//button[contains(text(), 'Cancel booking')]")))
+                                                    WebDriverWait(driver, 2, poll_frequency=0.1).until(EC.presence_of_element_located((By.XPATH, f"//tr[td[contains(text(), '{formatted_date_for_comparison}')]][td[contains(text(), '{normalized_start_time}')] and td[contains(text(), '{normalized_end_time}')]]//button[contains(text(), 'Cancel booking')]")))
                                                     st.success(f"Slot booked: {day}, {date}, {start_time}-{end_time} (Verified by 'Cancel booking' button)")
                                                     st.session_state.status = f"Slot booked: {day}, {date}, {start_time}-{end_time} (Verified)"
                                                     return
@@ -317,365 +314,17 @@ def add_slot(date_input_str, start_time, schedule_id):
         elif "generate_all_intervals" in config and config["generate_all_intervals"]:
             overall_start_dt = parser.parse(config["overall_start_time_str"])
             overall_end_dt = parser.parse(config["overall_end_time_str"])
-            break_start_dt = None
-            break_end_dt = None
-            if config["break_time_str"]:
-                break_start_dt = parser.parse(config["break_time_str"][0])
-                break_end_dt = parser.parse(config["break_time_str"][1])
+            break_start_dt = parser.parse(config["break_time_str"][0]) if config["break_time_str"] else None
+            break_end_dt = parser.parse(config["break_time_str"][1]) if config["break_time_str"] else None
 
             expected_start_times = _generate_interval_start_times(
                 overall_start_dt, overall_end_dt, config["slot_duration_minutes"],
                 break_start_dt, break_end_dt
             )
         
-        def normalize_time_for_check(time_str):
-            dt_obj = parser.parse(time_str)
-            return dt_obj.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM',' AM').replace('PM',' PM')
+        normalized_selected_start_time = normalize_time(start_time)
 
-        normalized_selected_start_time = normalize_time_for_check(start_separated Logic**: Move core booking logic into a separate function for clarity.
-- **Improved Error Handling**: Add more specific error messages and logging.
-- **Session State Safety**: Use callbacks to update session state more reliably.
-- **Security Note**: Add a warning about password storage (though not fully mitigated due to Streamlits limitations).
-
-### Updated Code
-<xaiArtifact artifact_id="3af1782b-d49f-4c44-a2c4-28ecb3def078" artifact_version_id="d1ab4fb9-1489-4657-a108-737a5b4bc89c" title="slot_booking_bot.py" contentType="text/python">
-import streamlit as st
-import threading
-import time
-from datetime import datetime, timedelta
-import re
-import schedule
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import StaleElementReferenceException, NoSuchElementException, TimeoutException, ElementClickInterceptedException
-import requests
-from webdriver_manager.chrome import ChromeDriverManager
-from dateutil import parser
-
-# Global for scheduled time and scheduler thread control
-scheduled_time = None
-scheduler_thread = None
-scheduler_stop_event = threading.Event()
-
-# Venue time slot configurations
-venue_details = {
-    "1731": {
-        "slot_duration_minutes": 120,
-        "overall_start_time_str": "8:00 AM", "overall_end_time_str": "4:30 PM",
-        "break_time_str": ("12:00 PM", "1:00 PM"),
-        "fixed_start_times_str": ["8:00 AM", "10:00 AM", "1:00 PM", "3:00 PM"]
-    },
-    "1851": {
-        "slot_duration_minutes": 120,
-        "overall_start_time_str": "8:00 AM", "overall_end_time_str": "4:30 PM",
-        "break_time_str": ("12:00 PM", "1:00 PM"),
-        "fixed_start_times_str": ["8:00 AM", "10:00 AM", "1:00 PM", "3:00 PM"]
-    },
-    "1852": {
-        "slot_duration_minutes": 60,
-        "overall_start_time_str": "8:00 AM", "overall_end_time_str": "4:00 PM",
-        "break_time_str": ("12:00 PM", "1:00 PM"),
-        "fixed_start_times_str": ["8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "1:00 PM", "2:00 PM", "3:00 PM"]
-    },
-    "1611": {
-        "slot_duration_minutes": 15,
-        "overall_start_time_str": "8:00 AM", "overall_end_time_str": "4:30 PM",
-        "break_time_str": ("12:00 PM", "1:00 PM"),
-        "generate_all_intervals": True
-    }
-}
-
-# URLs for scheduling
-urls = {
-    "1731": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36638",
-    "1851": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36298",
-    "1852": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=37641",
-    "1611": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36137"
-}
-
-def check_lms_connectivity(max_retries=3, delay=2):
-    lms_url = "https://lms2.ai.saveetha.in/"
-    st.session_state.status = "Checking LMS connectivity..."
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(lms_url, timeout=5)
-            if response.status_code == 200:
-                # Check if login page is accessible
-                if "login" in response.text.lower():
-                    st.session_state.status = f"LMS login page is accessible (Attempt {attempt + 1}/{max_retries})."
-                    return True
-                else:
-                    st.session_state.status = f"LMS URL accessible but login page not found (Attempt {attempt + 1}/{max_retries})."
-            else:
-                st.session_state.status = f"LMS URL returned status code: {response.status_code} (Attempt {attempt + 1}/{max_retries})."
-        except requests.exceptions.RequestException as e:
-            st.session_state.status = f"Failed to connect to LMS URL: {e} (Attempt {attempt + 1}/{max_retries})."
-        if attempt < max_retries - 1:
-            time.sleep(delay)
-    st.session_state.status = "LMS URL is not accessible after maximum retries."
-    return False
-
-def _generate_interval_start_times(overall_start_dt, overall_end_dt, interval_m, break_start_dt, break_end_dt):
-    times = []
-    current_time = overall_start_dt
-    while current_time < overall_end_dt:
-        is_during_break = False
-        if break_start_dt and break_end_dt:
-            if break_start_dt <= current_time < break_end_dt:
-                is_during_break = True
-        
-        if not is_during_break:
-            times.append(current_time.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM',' AM').replace('PM',' PM'))
-        
-        current_time += timedelta(minutes=interval_m)
-        
-        if break_start_dt and break_end_dt and break_start_dt <= current_time < break_end_dt:
-            current_time = break_end_dt
-            
-    return times
-
-def slot_booking_process(username, password, day, date, start_time, end_time, scheduler_url, proxy, headless, continuous=False, check_until_time=None):
-    driver = None
-    try:
-        st.session_state.status = "Initializing browser..."
-
-        options = ChromeOptions()
-        if headless:
-            options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1280,720")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--blink-settings=imagesEnabled=false")
-        options.add_argument("--page-load-strategy=eager")
-        options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
-        if proxy and re.match(r'^(http|https|socks5)://[\w\.-]+:\d+$', proxy):
-            options.add_argument(f'--proxy-server={proxy}')
-        elif proxy:
-            st.warning(f"Invalid proxy format: {proxy}. Proceeding without proxy.")
-            st.session_state.status = f"Warning: Invalid proxy format: {proxy}"
-
-        with webdriver.Chrome(service=webdriver.chrome.service.Service(ChromeDriverManager().install()), options=options) as driver:
-            st.session_state.status = "Logging in..."
-            driver.get("https://lms2.ai.saveetha.in/course/view.php?id=302")
-            try:
-                username_field = WebDriverWait(driver, 5, poll_frequency=0.1).until(EC.presence_of_element_located((By.NAME, 'username')))
-                username_field.send_keys(username)
-                driver.find_element(By.NAME, 'password').send_keys(password)
-                driver.find_element(By.ID, 'loginbtn').click()
-                st.session_state.status = "Logged in."
-            except TimeoutException as e:
-                st.error(f"Login timeout: {e}. Fields not found.")
-                st.session_state.status = f"Error: Login failed, fields not found."
-                return
-            except NoSuchElementException:
-                st.session_state.status = "Already logged in or login elements not present. Continuing..."
-
-            try:
-                date_obj = datetime.strptime(date.strip(), "%d %m %Y")
-                formatted_date_for_comparison = date_obj.strftime("%A, %d %B %Y")
-            except ValueError:
-                st.error(f"Invalid date format: {date}")
-                st.session_state.status = f"Error: Invalid date format provided."
-                return
-
-            def normalize_time(time_str):
-                try:
-                    dt = parser.parse(time_str, fuzzy=True)
-                    return dt.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM',' AM').replace('PM',' PM')
-                except ValueError:
-                    return time_str
-
-            normalized_start_time = normalize_time(start_time)
-            normalized_end_time = normalize_time(end_time)
-            st.session_state.status = f"Looking for slot: {formatted_date_for_comparison}, {normalized_start_time}-{normalized_end_time}"
-
-            found_slot = False
-            attempt = 0
-            refresh_interval = 0.5
-
-            deadline = None
-            if check_until_time and continuous:
-                try:
-                    deadline_dt = parser.parse(check_until_time)
-                    deadline = datetime.now().replace(hour=deadline_dt.hour, minute=deadline_dt.minute, second=0, microsecond=0)
-                    if deadline < datetime.now():
-                        deadline = deadline + timedelta(days=1)
-                    st.session_state.status = f"Will check until {deadline.strftime('%H:%M:%S')}"
-                except ValueError:
-                    st.error(f"Invalid time format for 'Check Until Time': {check_until_time}. Use HH:MM (e.g., 21:30).")
-                    st.session_state.status = f"Error: Invalid 'Check Until Time' format."
-                    return
-
-            while not found_slot and not scheduler_stop_event.is_set():
-                attempt += 1
-                st.session_state.status = f"Attempt {attempt}: Checking slot..."
-                
-                if deadline and datetime.now() > deadline:
-                    st.error(f"Deadline {deadline.strftime('%H:%M:%S')} reached. Stopping continuous check.")
-                    st.session_state.status = f"Deadline reached. Stopping."
-                    return
-
-                driver.get(scheduler_url)
-                page_source = driver.page_source
-                if any(error in page_source for error in ["503 Service Unavailable", "Service Temporarily Unavailable", "ERR_CONNECTION_REFUSED"]):
-                    st.session_state.status = f"Server error detected. Retrying... (Attempt {attempt})"
-                    time.sleep(refresh_interval)
-                    continue
-
-                try:
-                    WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.CSS_SELECTOR, "table#slotbookertable, table.generaltable")))
-                except TimeoutException:
-                    st.session_state.status = f"Table not loaded within 2 seconds. Retrying... (Attempt {attempt})"
-                    time.sleep(refresh_interval)
-                    continue
-
-                try:
-                    WebDriverWait(driver, 0.5).until(EC.presence_of_element_located((By.XPATH, "//button[contains(@class, 'btn') and contains(text(), 'Cancel booking')]")))
-                    st.warning("Existing booking found. Please cancel it manually to book a new slot.")
-                    st.session_state.status = "Existing booking found."
-                    return
-                except TimeoutException:
-                    pass
-
-                try:
-                    WebDriverWait(driver, 0.5).until(EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'Other participants')]")))
-                    st.warning("Frozen slot detected. Please resolve this manually to book a new slot.")
-                    st.session_state.status = "Frozen slot detected."
-                    return
-                except TimeoutException:
-                    pass
-
-                all_rows = WebDriverWait(driver, 1, poll_frequency=0.1).until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tbody tr")))
-                current_date_in_table = ""
-
-                for row in all_rows:
-                    try:
-                        cells = row.find_elements(By.TAG_NAME, 'td')
-                        if len(cells) < 8:
-                            continue
-
-                        date_cell_text = cells[0].text.strip()
-                        if date_cell_text:
-                            current_date_in_table = date_cell_text
-
-                        try:
-                            parsed_table_date = datetime.strptime(current_date_in_table, "%A, %d %B %Y")
-                        except ValueError:
-                            continue
-
-                        if parsed_table_date.date() == date_obj.date():
-                            table_start_time = normalize_time(cells[1].text.strip())
-                            table_end_time = normalize_time(cells[2].text.strip())
-
-                            if normalized_start_time == table_start_time and normalized_end_time == table_end_time:
-                                st.session_state.status = f"Found target slot: {table_start_time}-{table_end_time}"
-                                try:
-                                    book_button = cells[7].find_element(By.XPATH, ".//button[contains(text(), 'Book slot')]")
-                                    if book_button.is_enabled():
-                                        ActionChains(driver).move_to_element(book_button).click().perform()
-                                        found_slot = True
-                                        st.session_state.status = "Book slot button clicked."
-                                        try:
-                                            note_field = WebDriverWait(driver, 3, poll_frequency=0.1).until(EC.visibility_of_element_located((By.ID, "id_studentnote_editoreditable")))
-                                            note_field.send_keys("Booking for project work (automated)")
-                                            submit_button = WebDriverWait(driver, 1, poll_frequency=0.1).until(EC.element_to_be_clickable((By.ID, "id_submitbutton")))
-                                            submit_button.click()
-                                            st.session_state.status = "Note added and submit button clicked."
-                                            
-                                            try:
-                                                WebDriverWait(driver, 5, poll_frequency=0.1).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'confirmed') or contains(text(), 'success') or contains(text(), 'Your booking is confirmed')]")))
-                                                st.success(f"Slot booked successfully: {day}, {date}, {start_time}-{end_time}")
-                                                st.session_state.status = f"Slot booked successfully: {day}, {date}, {start_time}-{end_time}"
-                                                return
-                                            except TimeoutException:
-                                                try:
-                                                    WebDriverWait(driver, 2, poll_frequency=0.1).until(EC.presence_of_element_located((By.XPATH, f"//tr[td[contains(text(), '{formatted_date_for_comparison}')]][td[contains(text(), '{start_time}')] and td[contains(text(), '{end_time}')]]//button[contains(text(), 'Cancel booking')]")))
-                                                    st.success(f"Slot booked: {day}, {date}, {start_time}-{end_time} (Verified by 'Cancel booking' button)")
-                                                    st.session_state.status = f"Slot booked: {day}, {date}, {start_time}-{end_time} (Verified)"
-                                                    return
-                                                except TimeoutException:
-                                                    st.warning(f"Slot booked, but confirmation message not found. Please verify manually for: {day}, {date}, {start_time}-{end_time}")
-                                                    st.session_state.status = f"Slot booked: {day}, {date}, {start_time}-{end_time} (Verify manually)"
-                                                    return
-                                        except TimeoutException as te:
-                                            st.error(f"Failed to interact with note field or submit button: {te}")
-                                            st.session_state.status = f"Error: Booking form interaction failed."
-                                            return
-                                    else:
-                                        st.session_state.status = "Book slot button is disabled. Retrying..."
-                                        break
-                                except (NoSuchElementException, ElementClickInterceptedException) as e:
-                                    st.error(f"Button interaction error: {e}. Retrying...")
-                                    st.session_state.status = f"Error: Button interaction failed. Retrying..."
-                                    break
-                    except StaleElementReferenceException:
-                        st.session_state.status = "Stale element detected, refreshing page and retrying..."
-                        break
-                    except Exception as e:
-                        st.error(f"Error processing row: {e}")
-                        st.session_state.status = f"Error: Row processing failed. Retrying..."
-                        continue
-
-                if not found_slot and not continuous:
-                    st.error(f"Slot not found for {day}, {date}, {normalized_start_time}-{normalized_end_time}.")
-                    st.session_state.status = f"Slot not found: {day}, {date}, {normalized_start_time}-{normalized_end_time}."
-                    return
-                
-                if not found_slot:
-                    time.sleep(refresh_interval)
-
-    except Exception as e:
-        st.error(f"An unexpected error occurred during the booking process: {e}")
-        st.session_state.status = f"Unexpected error: {e}"
-
-def add_slot(date_input_str, start_time, schedule_id):
-    try:
-        date_obj = datetime.strptime(date_input_str, "%Y-%m-%d")
-        day = date_obj.strftime("%A")
-    except ValueError:
-        st.error("Please select a valid date.")
-        return
-
-    end_time = st.session_state.end_time
-
-    if not all([day, date_input_str, start_time, end_time]):
-        st.error("Please fill in all slot fields.")
-        return
-
-    selected_venue_id = schedule_id
-    if selected_venue_id in venue_details:
-        config = venue_details[selected_venue_id]
-        
-        expected_start_times = []
-        if "fixed_start_times_str" in config:
-            expected_start_times = config["fixed_start_times_str"]
-        elif "generate_all_intervals" in config and config["generate_all_intervals"]:
-            overall_start_dt = parser.parse(config["overall_start_time_str"])
-            overall_end_dt = parser.parse(config["overall_end_time_str"])
-            break_start_dt = None
-            break_end_dt = None
-            if config["break_time_str"]:
-                break_start_dt = parser.parse(config["break_time_str"][0])
-                break_end_dt = parser.parse(config["break_time_str"][1])
-
-            expected_start_times = _generate_interval_start_times(
-                overall_start_dt, overall_end_dt, config["slot_duration_minutes"],
-                break_start_dt, break_end_dt
-            )
-        
-        def normalize_time_for_check(time_str):
-            dt_obj = parser.parse(time_str)
-            return dt_obj.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM',' AM').replace('PM',' PM')
-
-        normalized_selected_start_time = normalize_time_for_check(start_time)
-
-        if normalized_selected_start_time not in [normalize_time_for_check(t) for t in expected_start_times]:
+        if normalized_selected_start_time not in [normalize_time(t) for t in expected_start_times]:
             st.error(f"The selected start time '{start_time}' is not valid for venue {selected_venue_id}.")
             return
 
@@ -702,7 +351,7 @@ def stop_process():
 
 def run_booking(continuous=False):
     username = st.session_state.username
-    password = st.session_state.password # Fixed: Use correct session state variable
+    password = st.session_state.password
     choice = st.session_state.schedule_venue_id
     headless = st.session_state.headless
     proxies = [p.strip() for p in st.session_state.proxies.split(",") if p.strip()]
@@ -746,15 +395,18 @@ def run_booking(continuous=False):
 def schedule_booking(schedule_time_str):
     global scheduled_time, scheduler_thread
     try:
-        schedule_dt = parser.parse(schedule_time_str)
+        schedule_dt = parser.parse(schedule_time_str, fuzzy=False)
+        if not (0 <= schedule_dt.hour <= 23 and 0 <= schedule_dt.minute <= 59):
+            raise ValueError("Invalid time")
+        schedule_time_formatted = schedule_dt.strftime("%H:%M")
         schedule.clear()
         scheduler_stop_event.clear()
-        scheduled_time = schedule_time_str
+        scheduled_time = schedule_time_formatted
         
-        schedule.every().day.at(schedule_time_str).do(lambda: run_booking(continuous=True))
+        schedule.every().day.at(schedule_time_formatted).do(lambda: run_booking(continuous=True))
         
-        st.success(f"Booking scheduled daily at {schedule_time_str}")
-        st.session_state.status = f"Status: Scheduled daily at {schedule_time_str}"
+        st.success(f"Booking scheduled daily at {schedule_time_formatted}")
+        st.session_state.status = f"Status: Scheduled daily at {schedule_time_formatted}"
 
         def run_schedule_continuously():
             while not scheduler_stop_event.is_set():
@@ -845,11 +497,8 @@ if schedule_venue_id in venue_details:
     config = venue_details[schedule_venue_id]
     overall_start_dt = parser.parse(config["overall_start_time_str"])
     overall_end_dt = parser.parse(config["overall_end_time_str"])
-    break_start_dt = None
-    break_end_dt = None
-    if config["break_time_str"]:
-        break_start_dt = parser.parse(config["break_time_str"][0])
-        break_end_dt = parser.parse(config["break_time_str"][1])
+    break_start_dt = parser.parse(config["break_time_str"][0]) if config["break_time_str"] else None
+    break_end_dt = parser.parse(config["break_time_str"][1]) if config["break_time_str"] else None
 
     if "fixed_start_times_str" in config:
         st.session_state.start_time_options = config["fixed_start_times_str"]
@@ -870,7 +519,7 @@ if start_time and schedule_venue_id in venue_details:
         overall_end_dt = parser.parse(config["overall_end_time_str"])
         potential_end_dt_obj = start_dt_obj + timedelta(minutes=config["slot_duration_minutes"])
         actual_end_dt_obj = min(potential_end_dt_obj, overall_end_dt)
-        st.session_state.end_time = actual_end_dt_obj.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM',' AM').replace('PM',' PM')
+        st.session_state.end_time = actual_end_dt_obj.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM', ' AM').replace('PM', ' PM')
     except ValueError:
         st.session_state.end_time = "Invalid Time"
 else:
@@ -919,12 +568,8 @@ st.write(st.session_state.status)
 st.markdown(
     """
     ---
-    **Important Note on Scheduling/Continuous Booking:**
-    This application uses Python's `threading` and `schedule` library for background tasks.
-    While this works for local execution, if you deploy this Streamlit app to a cloud platform
-    (like Streamlit Community Cloud), these background threads might not persist reliably
-    due to how Streamlit manages app processes. For robust, long-running background tasks
-    in a deployed environment, consider using a separate backend service or a dedicated
-    task scheduling system (e.g., Celery, Airflow).
+    **Important Notes:**
+    - **Scheduling/Continuous Booking**: This app uses Python's `threading` and `schedule` library for background tasks. This works locally, but in cloud deployments (e.g., Streamlit Community Cloud), threads may not persist due to Streamlit's process management. For production, use a dedicated task scheduler like Celery or Airflow.
+    - **Session State**: In multi-user deployments, `st.session_state` may lead to race conditions. For production, consider a backend database or user-specific sessions.
     """
 )
