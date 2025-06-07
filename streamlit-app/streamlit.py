@@ -448,18 +448,18 @@ if 'date_input' not in st.session_state:
     st.session_state.date_input = datetime.today().strftime("%Y-%m-%d")
 
 st.subheader("Credentials")
-username_input = st.text_input("Username", value=st.session_state.username, key="username")
-password_input = st.text_input("Password", type="password", value=st.session_state.password, key="password")
+username_input = st.text_input("Username", value=st.session_state.username, key="username_input")
+password_input = st.text_input("Password", type="password", value=st.session_state.password, key="password_input")
 st.session_state.username = username_input
 st.session_state.password = password_input
 
 st.subheader("Configuration")
-schedule_input = st.selectbox("Select Schedule", list(venue_details.keys()), index=list(venue_details.keys()).index(st.session_state.schedule), key="schedule")
-browser_input = st.selectbox("Select Browser", ["Chrome", "Firefox", "Edge"], index=["Chrome", "Firefox", "Edge"].index(st.session_state.browser), key="browser")
-proxies_input = st.text_input("Proxies (comma-separated, e.g., http://proxy1:port,http://proxy2:port)", value=st.session_state.proxies, key="proxies")
-schedule_time_input = st.text_input("Schedule Time (HH:MM, e.g., 21:03)", value=st.session_state.schedule_time, key="schedule_time")
-check_until_input = st.text_input("Check Until Time (HH:MM, e.g., 21:30, optional)", value=st.session_state.check_until, key="check_until")
-headless_input = st.checkbox("Run Headless (Continuous Refresh)", value=st.session_state.headless, key="headless")
+schedule_input = st.selectbox("Select Schedule", list(venue_details.keys()), index=list(venue_details.keys()).index(st.session_state.schedule), key="schedule_input")
+browser_input = st.selectbox("Select Browser", ["Chrome", "Firefox", "Edge"], index=["Chrome", "Firefox", "Edge"].index(st.session_state.browser), key="browser_input")
+proxies_input = st.text_input("Proxies (comma-separated, e.g., http://proxy1:port,http://proxy2:port)", value=st.session_state.proxies, key="proxies_input")
+schedule_time_input = st.text_input("Schedule Time (HH:MM, e.g., 21:03)", value=st.session_state.schedule_time, key="schedule_time_input")
+check_until_input = st.text_input("Check Until Time (HH:MM, e.g., 21:30, optional)", value=st.session_state.check_until, key="check_until_input")
+headless_input = st.checkbox("Run Headless (Continuous Refresh)", value=st.session_state.headless, key="headless_input")
 st.session_state.schedule = schedule_input
 st.session_state.browser = browser_input
 st.session_state.proxies = proxies_input
@@ -468,14 +468,14 @@ st.session_state.check_until = check_until_input
 st.session_state.headless = headless_input
 
 st.subheader("Slot Details")
-date_input = st.date_input("Date", min_value=datetime.today(), value=datetime.strptime(st.session_state.date_input, "%Y-%m-%d"), key="date_input")
+date_input = st.date_input("Date", min_value=datetime.today(), value=datetime.strptime(st.session_state.date_input, "%Y-%m-%d"), key="date_input_field")
 st.session_state.date_input = date_input.strftime("%Y-%m-%d")
 try:
     date_obj = datetime.strptime(st.session_state.date_input, "%Y-%m-%d")
     st.session_state.day = date_obj.strftime("%A")
 except ValueError:
     st.session_state.day = ""
-st.text_input("Day (Auto-filled)", value=st.session_state.day, disabled=True, key="day")
+st.text_input("Day (Auto-filled)", value=st.session_state.day, disabled=True, key="day_input")
 
 if st.session_state.schedule in venue_details:
     config = venue_details[st.session_state.schedule]
@@ -495,7 +495,7 @@ if st.session_state.schedule in venue_details:
             break_start_dt, break_end_dt
         )
 
-start_time_input = st.selectbox("Start Time", st.session_state.start_time_options, key="start_time")
+start_time_input = st.selectbox("Start Time", st.session_state.start_time_options, key="start_time_input")
 st.session_state.start_time = start_time_input
 if st.session_state.start_time and st.session_state.schedule in venue_details:
     config = venue_details[st.session_state.schedule]
@@ -508,7 +508,7 @@ if st.session_state.start_time and st.session_state.schedule in venue_details:
     except ValueError:
         st.session_state.end_time = "Invalid Time"
 
-st.text_input("End Time", value=st.session_state.end_time, disabled=True, key="end_time")
+st.text_input("End Time", value=st.session_state.end_time, disabled=True, key="end_time_input")
 
 if st.button("Add Slot", key="add_slot"):
     add_slot()
@@ -530,4 +530,3 @@ if col3.button("Stop Process", key="stop_process"):
     stop_process()
 
 st.write(st.session_state.status)
-
