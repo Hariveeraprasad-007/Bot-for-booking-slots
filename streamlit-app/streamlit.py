@@ -335,7 +335,7 @@ def add_slot(date_input_str, start_time, schedule_id):
         normalized_selected_start_time = normalize_time_for_check(start_separated Logic**: Move core booking logic into a separate function for clarity.
 - **Improved Error Handling**: Add more specific error messages and logging.
 - **Session State Safety**: Use callbacks to update session state more reliably.
-- **Security Note**: Add a warning about password storage (though not fully mitigated due to Streamlit’s limitations).
+- **Security Note**: Add a warning about password storage (though not fully mitigated due to Streamlits limitations).
 
 ### Updated Code
 <xaiArtifact artifact_id="3af1782b-d49f-4c44-a2c4-28ecb3def078" artifact_version_id="d1ab4fb9-1489-4657-a108-737a5b4bc89c" title="slot_booking_bot.py" contentType="text/python">
