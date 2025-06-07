@@ -7,23 +7,11 @@ import schedule
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.firefox.options import Options as FirefoxOptions
-from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import StaleElementReferenceException, NoSuchElementException, TimeoutException, ElementClickInterceptedException
 import requests
-try:
-    from playsound import playsound
-    SOUND_AVAILABLE = True
-except ImportError:
-    SOUND_AVAILABLE = False
-try:
-    import GPUtil
-    GPU_AVAILABLE = True
-except ImportError:
-    GPU_AVAILABLE = False
 
 # Global lists to hold slot details, active threads, and drivers
 slot_list = []
@@ -67,37 +55,23 @@ urls = {
     "1611": "https://lms2.ai.saveetha.in/mod/scheduler/view.php?id=36137"
 }
 
-# Check LMS connectivity
-def check_lms_connectivity():
+# Check LMS connectivity with retries
+def check_lms_connectivity(max_retries=3, delay=2):
     lms_url = "https://lms2.ai.saveetha.in/"
-    try:
-        response = requests.get(lms_url, timeout=5)
-        if response.status_code == 200:
-            st.success("LMS URL is accessible.")
-            return True
-        else:
-            st.error(f"LMS URL returned status code: {response.status_code}")
-            return False
-    except requests.exceptions.RequestException as e:
-        st.error(f"Failed to connect to LMS URL: {e}")
-        return False
-
-def check_gpu_availability():
-    if GPU_AVAILABLE:
+    for attempt in range(max_retries):
         try:
-            gpus = GPUtil.getGPUs()
-            if gpus and any(gpu.load < 0.9 for gpu in gpus):
-                st.info("GPU detected and available.")
-                return True, "--enable-gpu"
+            response = requests.get(lms_url, timeout=5)
+            if response.status_code == 200:
+                st.success(f"LMS URL is accessible (Attempt {attempt + 1}/{max_retries}).")
+                return True
             else:
-                st.warning("No available GPU or GPU fully utilized. Falling back to CPU.")
-                return False, "--disable-gpu"
-        except Exception as e:
-            st.error(f"Error checking GPU: {e}. Falling back to CPU.")
-            return False, "--disable-gpu"
-    else:
-        st.warning("GPUtil not installed. Falling back to CPU.")
-        return False, "--disable-gpu"
+                st.warning(f"LMS URL returned status code: {response.status_code} (Attempt {attempt + 1}/{max_retries})")
+        except requests.exceptions.RequestException as e:
+            st.warning(f"Failed to connect to LMS URL: {e} (Attempt {attempt + 1}/{max_retries})")
+        if attempt < max_retries - 1:
+            time.sleep(delay)
+    st.error("LMS URL is not accessible after maximum retries.")
+    return False
 
 def _generate_interval_start_times(overall_start_dt, overall_end_dt, interval_m, break_start_dt, break_end_dt):
     times = []
@@ -115,79 +89,37 @@ def _generate_interval_start_times(overall_start_dt, overall_end_dt, interval_m,
             current_time = break_end_dt
     return times
 
-def slot_booking_process(username_input, password_input, day, date, start_time, end_time, scheduler_url, proxy, headless, browser_choice, continuous=False, check_until_time=None):
+def slot_booking_process(username, password, day, date, start_time, end_time, scheduler_url, proxy, headless, continuous=False, check_until_time=None):
     driver = None
     try:
-        use_gpu, gpu_arg = check_gpu_availability()
-        st.session_state.status = f"Using {'GPU' if use_gpu else 'CPU'} | Initializing..."
+        st.session_state.status = "Initializing browser..."
 
-        deadline = None
-        if check_until_time and continuous:
-            try:
-                deadline = datetime.strptime(check_until_time, "%H:%M")
-                deadline = datetime.now().replace(hour=deadline.hour, minute=deadline.minute, second=0, microsecond=0)
-                if deadline < datetime.now():
-                    deadline = deadline.replace(day=deadline.day + 1)
-                st.write(f"Will check until {deadline.strftime('%H:%M:%S')}")
-            except ValueError:
-                st.error(f"Invalid time format: {check_until_time}. Use HH:MM (e.g., 21:30).")
-                return
-
-        if browser_choice == "Chrome":
-            options = ChromeOptions()
-            options.add_argument("--headless=new")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1280,720")
-            options.add_argument("--disable-extensions")
-            options.add_argument("--blink-settings=imagesEnabled=false")
-            options.add_argument("--page-load-strategy=eager")
-            options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
-            try:
-                driver = webdriver.Chrome(options=options)
-            except Exception as e:
-                st.error(f"Failed to initialize Chrome driver: {e}")
-                return
-        elif browser_choice == "Firefox":
-            options = FirefoxOptions()
-            options.add_argument("--headless")
-            if proxy:
-                options.set_preference("network.proxy.type", 1)
-                options.set_preference("network.proxy.http", proxy.split(":")[0])
-                options.set_preference("network.proxy.http_port", int(proxy.split(":")[1]))
-            options.set_preference("permissions.default.image", 2)
-            options.set_preference("dom.ipc.processCount", 8)
-            try:
-                driver = webdriver.Firefox(options=options)
-            except Exception as e:
-                st.error(f"Failed to initialize Firefox driver: {e}")
-                return
-        elif browser_choice == "Edge":
-            options = EdgeOptions()
-            options.add_argument("--headless")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1280,720")
-            options.add_argument("--blink-settings=imagesEnabled=false")
-            options.add_argument("--page-load-strategy=eager")
-            try:
-                driver = webdriver.Edge(options=options)
-            except Exception as e:
-                st.error(f"Failed to initialize Edge driver: {e}")
-                return
-        else:
-            raise ValueError("Unsupported browser")
+        options = ChromeOptions()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1280,720")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--blink-settings=imagesEnabled=false")
+        options.add_argument("--page-load-strategy=eager")
+        options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
+        try:
+            driver = webdriver.Chrome(options=options)
+        except Exception as e:
+            st.error(f"Failed to initialize Chrome driver: {e}")
+            return
 
         active_drivers.append(driver)
-        st.write(f"Running in {browser_choice} headless mode")
+        st.write("Running in Chrome headless mode")
         driver.implicitly_wait(0.2)
 
         st.session_state.status = "Logging in..."
         driver.get("https://lms2.ai.saveetha.in/course/view.php?id=302")
         try:
             username_field = WebDriverWait(driver, 3, poll_frequency=0.1).until(EC.presence_of_element_located((By.NAME, 'username')))
-            username_field.send_keys(username_input)
-            driver.find_element(By.NAME, 'password').send_keys(password_input)
+            username_field.send_keys(username)
+            driver.find_element(By.NAME, 'password').send_keys(password)
             driver.find_element(By.ID, 'loginbtn').click()
             st.write("Logged in")
         except TimeoutException as e:
@@ -211,6 +143,18 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
         found_slot = False
         attempt = 0
         refresh_interval = 0.5
+
+        deadline = None
+        if check_until_time and continuous:
+            try:
+                deadline = datetime.strptime(check_until_time, "%H:%M")
+                deadline = datetime.now().replace(hour=deadline.hour, minute=deadline.minute, second=0, microsecond=0)
+                if deadline < datetime.now():
+                    deadline = deadline.replace(day=deadline.day + 1)
+                st.write(f"Will check until {deadline.strftime('%H:%M:%S')}")
+            except ValueError:
+                st.error(f"Invalid time format: {check_until_time}. Use HH:MM (e.g., 21:30).")
+                return
 
         while not found_slot:
             attempt += 1
@@ -278,11 +222,6 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                                         try:
                                             WebDriverWait(driver, 2, poll_frequency=0.1).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'confirmed') or contains(text(), 'success')]")))
                                             st.success(f"Slot booked: {day}, {date}, {start_time}-{end_time}")
-                                            if SOUND_AVAILABLE:
-                                                try:
-                                                    playsound('success.wav')
-                                                except Exception as se:
-                                                    st.error(f"Error playing sound: {se}")
                                             return
                                         except TimeoutException:
                                             WebDriverWait(driver, 2, poll_frequency=0.1).until(EC.presence_of_element_located((By.XPATH, f"//tr[td[contains(text(), '{formatted_date_for_comparison}')]][td[contains(text(), '{start_time}')] and td[contains(text(), '{end_time}')]]")))
@@ -313,30 +252,27 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
         st.error(f"Unexpected error: {e}")
     finally:
         if driver:
-            if driver in active_drivers:
-                active_drivers.remove(driver)
             try:
+                if driver in active_drivers:
+                    active_drivers.remove(driver)
                 driver.quit()
-            except Exception:
-                pass
+            except Exception as e:
+                st.warning(f"Error closing driver: {e}")
 
-def add_slot():
-    date = st.session_state.date_input
+def add_slot(date_input, start_time, schedule):
     try:
-        date_obj = datetime.strptime(date, "%Y-%m-%d")
+        date_obj = datetime.strptime(date_input, "%Y-%m-%d")
         day = date_obj.strftime("%A")
-        st.session_state.day = day
     except ValueError:
         st.error("Please select a valid date.")
         return
 
-    start_time = st.session_state.start_time
     end_time = st.session_state.end_time
-    if not all([day, date, start_time, end_time]):
+    if not all([day, date_input, start_time, end_time]):
         st.error("Please fill in all slot fields.")
         return
 
-    selected_venue_id = st.session_state.schedule
+    selected_venue_id = schedule
     if selected_venue_id in venue_details:
         config = venue_details[selected_venue_id]
         overall_start_dt = datetime.strptime(config["overall_start_time_str"], "%I:%M %p")
@@ -401,10 +337,9 @@ def run_booking(continuous=False):
     username = st.session_state.username
     password = st.session_state.password
     choice = st.session_state.schedule
-    browser_choice = "Chrome"  # Force Chrome for Streamlit Cloud compatibility
-    headless_mode = st.session_state.headless
+    headless = st.session_state.headless
     proxies = st.session_state.proxies.split(",") if st.session_state.proxies else []
-    check_until_time = st.session_state.check_until or None
+    check_until = st.session_state.check_until or None
 
     if choice not in urls:
         st.error("Invalid schedule selected.")
@@ -421,14 +356,13 @@ def run_booking(continuous=False):
         proxy = proxies[i % len(proxies)] if proxies else None
         thread = threading.Thread(target=slot_booking_process, args=(
             username, password, slot["day"], slot["date"], slot["start_time"], slot["end_time"],
-            scheduler_url, proxy, headless_mode, browser_choice, continuous, check_until_time
+            scheduler_url, proxy, headless, continuous, check_until
         ))
         active_threads.append(thread)
         thread.start()
 
-def schedule_booking():
+def schedule_booking(schedule_time):
     global scheduled_time
-    schedule_time = st.session_state.schedule_time
     try:
         datetime.strptime(schedule_time, "%H:%M")
         schedule.clear()
@@ -448,11 +382,7 @@ def schedule_booking():
 # Streamlit UI
 st.title("Enhanced Slot Booking Bot - Saveetha LMS")
 
-# Initialize session state defaults
-if 'username' not in st.session_state:
-    st.session_state.username = ""
-if 'password' not in st.session_state:
-    st.session_state.password = ""
+# Initialize session state defaults (only for non-widget data)
 if 'slots' not in st.session_state:
     st.session_state.slots = []
 if 'status' not in st.session_state:
@@ -461,10 +391,12 @@ if 'start_time_options' not in st.session_state:
     st.session_state.start_time_options = []
 if 'end_time' not in st.session_state:
     st.session_state.end_time = ""
-if 'day' not in st.session_state:
-    st.session_state.day = ""
 if 'schedule' not in st.session_state:
     st.session_state.schedule = list(venue_details.keys())[0]
+if 'username' not in st.session_state:
+    st.session_state.username = ""
+if 'password' not in st.session_state:
+    st.session_state.password = ""
 if 'proxies' not in st.session_state:
     st.session_state.proxies = ""
 if 'schedule_time' not in st.session_state:
@@ -475,6 +407,8 @@ if 'headless' not in st.session_state:
     st.session_state.headless = True
 if 'date_input' not in st.session_state:
     st.session_state.date_input = datetime.today().strftime("%Y-%m-%d")
+if 'day' not in st.session_state:
+    st.session_state.day = ""
 
 # Credentials
 st.subheader("Credentials")
@@ -505,10 +439,11 @@ try:
     st.session_state.day = date_obj.strftime("%A")
 except ValueError:
     st.session_state.day = ""
-st.text_input("Day (Auto-filled)", value=st.session_state.day, disabled=True, key="day_input")
+day = st.session_state.day
+st.text_input("Day (Auto-filled)", value=day, disabled=True, key="day_input")
 
-if st.session_state.schedule in venue_details:
-    config = venue_details[st.session_state.schedule]
+if schedule in venue_details:
+    config = venue_details[schedule]
     overall_start_dt = datetime.strptime(config["overall_start_time_str"], "%I:%M %p")
     overall_end_dt = datetime.strptime(config["overall_end_time_str"], "%I:%M %p")
     break_start_dt = None
@@ -526,22 +461,21 @@ if st.session_state.schedule in venue_details:
         )
 
 start_time = st.selectbox("Start Time", st.session_state.start_time_options, key="start_time_input")
-st.session_state.start_time = start_time
-if st.session_state.start_time and st.session_state.schedule in venue_details:
-    config = venue_details[st.session_state.schedule]
+if start_time and schedule in venue_details:
+    config = venue_details[schedule]
     try:
-        start_dt_obj = datetime.strptime(st.session_state.start_time, "%I:%M %p")
+        start_dt_obj = datetime.strptime(start_time, "%I:%M %p")
         overall_end_dt = datetime.strptime(config["overall_end_time_str"], "%I:%M %p")
         potential_end_dt_obj = start_dt_obj + timedelta(minutes=config["slot_duration_minutes"])
         actual_end_dt_obj = min(potential_end_dt_obj, overall_end_dt)
         st.session_state.end_time = actual_end_dt_obj.strftime("%I:%M %p").lstrip('0').replace(' 0', ' ').replace(':00 ', ':00').replace('AM',' AM').replace('PM',' PM')
     except ValueError:
         st.session_state.end_time = "Invalid Time"
-
-st.text_input("End Time", value=st.session_state.end_time, disabled=True, key="end_time_input")
+end_time = st.session_state.end_time
+st.text_input("End Time", value=end_time, disabled=True, key="end_time_input")
 
 if st.button("Add Slot", key="add_slot"):
-    add_slot()
+    add_slot(date_input.strftime("%Y-%m-%d"), start_time, schedule)
 
 # Selected Slots
 st.subheader("Selected Slots")
@@ -557,7 +491,7 @@ col1, col2, col3 = st.columns(3)
 if col1.button("Book Slots Now", key="book_now"):
     run_booking(continuous=True)
 if col2.button("Schedule Booking", key="schedule_booking"):
-    schedule_booking()
+    schedule_booking(schedule_time)
 if col3.button("Stop Process", key="stop_process"):
     stop_process()
 
