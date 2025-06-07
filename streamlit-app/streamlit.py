@@ -416,8 +416,14 @@ def schedule_booking():
         st.error("Invalid time format. Use HH:MM (e.g., 21:03).")
 
 # Streamlit UI
+# Streamlit UI
 st.title("Enhanced Slot Booking Bot - Saveetha LMS")
 
+# Initialize session state defaults
+if 'username' not in st.session_state:
+    st.session_state.username = ""
+if 'password' not in st.session_state:
+    st.session_state.password = ""
 if 'slots' not in st.session_state:
     st.session_state.slots = []
 if 'status' not in st.session_state:
@@ -428,10 +434,26 @@ if 'end_time' not in st.session_state:
     st.session_state.end_time = ""
 if 'day' not in st.session_state:
     st.session_state.day = ""
+if 'schedule' not in st.session_state:
+    st.session_state.schedule = list(venue_details.keys())[0]
+if 'browser' not in st.session_state:
+    st.session_state.browser = "Chrome"
+if 'proxies' not in st.session_state:
+    st.session_state.proxies = ""
+if 'schedule_time' not in st.session_state:
+    st.session_state.schedule_time = ""
+if 'check_until' not in st.session_state:
+    st.session_state.check_until = ""
+if 'headless' not in st.session_state:
+    st.session_state.headless = True
+if 'date_input' not in st.session_state:
+    st.session_state.date_input = datetime.today().strftime("%Y-%m-%d")
 
 st.subheader("Credentials")
-st.session_state.username = st.text_input("Username", key="username")
-st.session_state.password = st.text_input("Password", type="password", key="password")
+username_input = st.text_input("Username", value=st.session_state.username, key="username")
+password_input = st.text_input("Password", type="password", value=st.session_state.password, key="password")
+st.session_state.username = username_input
+st.session_state.password = password_input
 
 st.subheader("Configuration")
 st.session_state.schedule = st.selectbox("Select Schedule", list(venue_details.keys()), key="schedule")
