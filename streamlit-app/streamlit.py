@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import threading
 import time
@@ -531,4 +530,4 @@ if col3.button("Stop Process", key="stop_process"):
     stop_process()
 
 st.write(st.session_state.status)
-```
+
