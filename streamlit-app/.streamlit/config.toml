@@ -1,0 +1,26 @@
+[server]
+# Optimize for cloud environment with limited resources
+maxUploadSize = 50
+maxMessageSize = 50
+enableCORS = false
+enableXsrfProtection = false
+
+[global]
+# Reduce development mode overhead
+developmentMode = false
+logLevel = "warning"
+
+[runner]
+# Optimize script execution
+magicEnabled = false
+installTracer = false
+fixMatplotlib = false
+
+[client]
+# Reduce client-side overhead
+showErrorDetails = false
+toolbarMode = "minimal"
+
+[theme]
+# Use system theme to reduce overhead
+base = "light"

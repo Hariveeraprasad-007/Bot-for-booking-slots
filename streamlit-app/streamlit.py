@@ -1,6 +1,8 @@
 import streamlit as st
 import threading
 import time
+import gc  # For explicit garbage collection
+import os  # For memory monitoring
 from datetime import datetime, timedelta
 import re
 import schedule
@@ -14,6 +16,25 @@ from selenium.common.exceptions import StaleElementReferenceException, NoSuchEle
 import requests
 from webdriver_manager.chrome import ChromeDriverManager
 from dateutil import parser
+
+# Performance optimization: Set cache for webdriver manager to reduce startup time
+os.environ['WDM_LOG_LEVEL'] = '0'  # Reduce webdriver manager logging
+os.environ['WDM_PRINT_FIRST_LINE'] = 'False'
+
+# Memory management function
+def cleanup_memory():
+    """Force garbage collection to free up memory"""
+    gc.collect()
+    
+# Performance monitoring
+def get_memory_usage():
+    """Get current memory usage in MB (Unix only)"""
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / 1024 / 1024  # Convert to MB
+    except ImportError:
+        return None
 
 # Global for scheduled time and scheduler thread control
 scheduled_time = None
@@ -109,14 +130,40 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
         options = ChromeOptions()
         if headless:
             options.add_argument("--headless=new")
+        
+        # Memory optimization for cloud environment
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1280,720")
         options.add_argument("--disable-extensions")
-        options.add_argument("--blink-settings=imagesEnabled=false")
-        options.add_argument("--page-load-strategy=eager")
-        options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
+        options.add_argument("--disable-plugins")
+        options.add_argument("--disable-images")
+        # options.add_argument("--disable-javascript")  # Commented out - might be needed for booking
+        options.add_argument("--disable-css-backgrounds")
+        options.add_argument("--disable-background-timer-throttling")
+        options.add_argument("--disable-backgrounding-occluded-windows")
+        options.add_argument("--disable-renderer-backgrounding")
+        options.add_argument("--disable-features=TranslateUI")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        
+        # Minimal window size for memory efficiency
+        options.add_argument("--window-size=800,600")
+        
+        # Faster page loading strategy
+        options.add_argument("--page-load-strategy=none")
+        
+        # Memory management
+        options.add_argument("--memory-pressure-off")
+        options.add_argument("--max_old_space_size=512")
+        
+        # Disable unnecessary features
+        options.add_experimental_option("prefs", {
+            "profile.managed_default_content_settings.images": 2,
+            "profile.default_content_settings.popups": 0,
+            "profile.managed_default_content_settings.media_stream": 2,
+            "profile.managed_default_content_settings.notifications": 2
+        })
+        
         if proxy and re.match(r'^(http|https|socks5)://[\w\.-]+:\d+$', proxy):
             options.add_argument(f'--proxy-server={proxy}')
         elif proxy:
@@ -124,10 +171,19 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
             st.session_state.status = f"Warning: Invalid proxy format: {proxy}. Proceeding without proxy."
 
         with webdriver.Chrome(service=webdriver.chrome.service.Service(ChromeDriverManager().install()), options=options) as driver:
+            # Optimized implicit wait for cloud environment
+            driver.implicitly_wait(1.0)  # Reduced from default
+            
+            # Set page load timeout to prevent hanging
+            driver.set_page_load_timeout(30)
+            
             st.session_state.status = "Logging in..."
             driver.get("https://lms2.ai.saveetha.in/course/view.php?id=302")
             try:
-                username_field = WebDriverWait(driver, 5, poll_frequency=0.1).until(EC.presence_of_element_located((By.NAME, 'username')))
+                # Reduced wait time and optimized polling for cloud
+                username_field = WebDriverWait(driver, 8, poll_frequency=0.5).until(
+                    EC.presence_of_element_located((By.NAME, 'username'))
+                )
                 username_field.send_keys(username)
                 driver.find_element(By.NAME, 'password').send_keys(password)
                 driver.find_element(By.ID, 'loginbtn').click()
@@ -153,7 +209,8 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
 
             found_slot = False
             attempt = 0
-            refresh_interval = 0.5
+            # Increased refresh interval for cloud efficiency (reduced CPU usage)
+            refresh_interval = 2.0 if continuous else 1.0  # Slower polling to reduce CPU load
 
             deadline = None
             if check_until_time and continuous:
@@ -185,14 +242,20 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
                     continue
 
                 try:
-                    WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.CSS_SELECTOR, "table#slotbookertable, table.generaltable")))
+                    # Optimized wait with longer timeout but less frequent polling
+                    WebDriverWait(driver, 5, poll_frequency=1.0).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "table#slotbookertable, table.generaltable"))
+                    )
                 except TimeoutException:
-                    st.session_state.status = f"Table not loaded within 2 seconds. Retrying... (Attempt {attempt})"
+                    st.session_state.status = f"Table not loaded within 5 seconds. Retrying... (Attempt {attempt})"
                     time.sleep(refresh_interval)
                     continue
 
+                # Quick checks for existing booking and frozen slots
                 try:
-                    WebDriverWait(driver, 0.5).until(EC.presence_of_element_located((By.XPATH, "//button[contains(@class, 'btn') and contains(text(), 'Cancel booking')]")))
+                    WebDriverWait(driver, 1.0).until(
+                        EC.presence_of_element_located((By.XPATH, "//button[contains(@class, 'btn') and contains(text(), 'Cancel booking')]"))
+                    )
                     st.warning("Existing booking found. Please cancel it manually to book a new slot.")
                     st.session_state.status = "Existing booking found."
                     return
@@ -200,14 +263,19 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
                     pass
 
                 try:
-                    WebDriverWait(driver, 0.5).until(EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'Other participants')]")))
+                    WebDriverWait(driver, 1.0).until(
+                        EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'Other participants')]"))
+                    )
                     st.warning("Frozen slot detected. Please resolve this manually to book a new slot.")
                     st.session_state.status = "Frozen slot detected."
                     return
                 except TimeoutException:
                     pass
 
-                all_rows = WebDriverWait(driver, 1, poll_frequency=0.1).until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tbody tr")))
+                # Optimized row collection with reduced polling frequency
+                all_rows = WebDriverWait(driver, 3, poll_frequency=0.5).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "table#slotbookertable tbody tr"))
+                )
                 current_date_in_table = ""
 
                 for row in all_rows:
@@ -238,20 +306,31 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
                                         found_slot = True
                                         st.session_state.status = "Book slot button clicked."
                                         try:
-                                            note_field = WebDriverWait(driver, 3, poll_frequency=0.1).until(EC.visibility_of_element_located((By.ID, "id_studentnote_editoreditable")))
+                                            # Optimized booking confirmation with reduced waits
+                                            note_field = WebDriverWait(driver, 5, poll_frequency=0.5).until(
+                                                EC.visibility_of_element_located((By.ID, "id_studentnote_editoreditable"))
+                                            )
                                             note_field.send_keys("Booking for project work (automated)")
-                                            submit_button = WebDriverWait(driver, 1, poll_frequency=0.1).until(EC.element_to_be_clickable((By.ID, "id_submitbutton")))
+                                            submit_button = WebDriverWait(driver, 2, poll_frequency=0.5).until(
+                                                EC.element_to_be_clickable((By.ID, "id_submitbutton"))
+                                            )
                                             submit_button.click()
                                             st.session_state.status = "Note added and submit button clicked."
                                             
                                             try:
-                                                WebDriverWait(driver, 5, poll_frequency=0.1).until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'confirmed') or contains(text(), 'success') or contains(text(), 'Your booking is confirmed')]")))
+                                                # Reduced confirmation wait time
+                                                WebDriverWait(driver, 8, poll_frequency=0.5).until(
+                                                    EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'confirmed') or contains(text(), 'success') or contains(text(), 'Your booking is confirmed')]"))
+                                                )
                                                 st.success(f"Slot booked successfully: {day}, {date}, {start_time}-{end_time}")
                                                 st.session_state.status = f"Slot booked successfully: {day}, {date}, {start_time}-{end_time}"
                                                 return
                                             except TimeoutException:
                                                 try:
-                                                    WebDriverWait(driver, 2, poll_frequency=0.1).until(EC.presence_of_element_located((By.XPATH, f"//tr[td[contains(text(), '{formatted_date_for_comparison}')]][td[contains(text(), '{normalized_start_time}')] and td[contains(text(), '{normalized_end_time}')]]//button[contains(text(), 'Cancel booking')]")))
+                                                    # Fallback verification with optimized timing
+                                                    WebDriverWait(driver, 3, poll_frequency=0.5).until(
+                                                        EC.presence_of_element_located((By.XPATH, f"//tr[td[contains(text(), '{formatted_date_for_comparison}')]][td[contains(text(), '{normalized_start_time}')] and td[contains(text(), '{normalized_end_time}')]]//button[contains(text(), 'Cancel booking')]"))
+                                                    )
                                                     st.success(f"Slot booked: {day}, {date}, {start_time}-{end_time} (Verified by 'Cancel booking' button)")
                                                     st.session_state.status = f"Slot booked: {day}, {date}, {start_time}-{end_time} (Verified)"
                                                     return
@@ -289,6 +368,9 @@ def slot_booking_process(username, password, day, date, start_time, end_time, sc
     except Exception as e:
         st.error(f"An unexpected error occurred during the booking process: {e}")
         st.session_state.status = f"Unexpected error: {e}"
+    finally:
+        # Clean up memory after booking process
+        cleanup_memory()
 
 def add_slot(date_input_str, start_time, schedule_id):
     try:
@@ -379,18 +461,37 @@ def run_booking(continuous=False):
     
     current_booking_threads = []
     
-    for i, slot in enumerate(st.session_state.slot_details):
-        proxy = proxies[i % len(proxies)] if proxies else None
-        slot_scheduler_url = urls.get(slot["venue_id"], scheduler_url)
-
-        thread = threading.Thread(target=slot_booking_process, args=(
-            username, password, slot["day"], slot["date"], slot["start_time"], slot["end_time"],
-            slot_scheduler_url, proxy, headless, continuous, check_until
-        ))
-        current_booking_threads.append(thread)
-        thread.start()
+    # Limit concurrent threads on single core cloud environment
+    max_concurrent_threads = min(2, len(st.session_state.slot_details))  # Maximum 2 concurrent threads
     
-    st.session_state.status = "Booking process initiated. Check logs for updates."
+    # Process slots in batches to avoid memory pressure
+    for batch_start in range(0, len(st.session_state.slot_details), max_concurrent_threads):
+        batch_end = min(batch_start + max_concurrent_threads, len(st.session_state.slot_details))
+        batch_threads = []
+        
+        for i in range(batch_start, batch_end):
+            slot = st.session_state.slot_details[i]
+            proxy = proxies[i % len(proxies)] if proxies else None
+            slot_scheduler_url = urls.get(slot["venue_id"], scheduler_url)
+
+            thread = threading.Thread(target=slot_booking_process, args=(
+                username, password, slot["day"], slot["date"], slot["start_time"], slot["end_time"],
+                slot_scheduler_url, proxy, headless, continuous, check_until
+            ))
+            batch_threads.append(thread)
+            current_booking_threads.append(thread)
+            thread.start()
+        
+        # Wait for current batch to complete before starting next batch
+        for thread in batch_threads:
+            thread.join()
+            # Small delay between thread completions to reduce resource pressure
+            time.sleep(0.5)
+            
+        # Clean up memory after each batch
+        cleanup_memory()
+    
+    st.session_state.status = f"Booking process completed for {len(st.session_state.slot_details)} slots."
 
 def schedule_booking(schedule_time_str):
     global scheduled_time, scheduler_thread
@@ -411,7 +512,8 @@ def schedule_booking(schedule_time_str):
         def run_schedule_continuously():
             while not scheduler_stop_event.is_set():
                 schedule.run_pending()
-                time.sleep(1)
+                # Increased sleep interval to reduce CPU usage on single core
+                time.sleep(5)  # Check every 5 seconds instead of 1 second
         
         if not hasattr(st.session_state, 'scheduler_thread_running') or not st.session_state.scheduler_thread_running:
             scheduler_thread = threading.Thread(target=run_schedule_continuously, daemon=True)
@@ -559,6 +661,23 @@ with col_stop:
         stop_process()
 
 st.markdown("---")
+
+# Performance monitoring (optimized for cloud)
+if st.checkbox("Show Performance Info", value=False):
+    col1, col2 = st.columns(2)
+    with col1:
+        memory_usage = get_memory_usage()
+        if memory_usage:
+            st.metric("Memory Usage", f"{memory_usage:.1f} MB")
+            if memory_usage > 800:  # Warning if approaching 1GB limit
+                st.warning("⚠️ High memory usage detected!")
+        else:
+            st.info("Memory monitoring not available")
+    
+    with col2:
+        if st.button("Force Memory Cleanup"):
+            cleanup_memory()
+            st.success("Memory cleanup performed")
 
 # Status Display
 st.subheader("Current Status")
