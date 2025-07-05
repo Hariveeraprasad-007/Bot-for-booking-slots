@@ -135,18 +135,29 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                 root.after(0, lambda: messagebox.showerror("Error", "Invalid time format. Use HH:MM (e.g., 21:30)."))
                 return
 
-        # Browser setup (optimized for speed)
+        # Browser setup (optimized for performance)
         if browser_choice == "Chrome":
             options = ChromeOptions()
-            options.add_argument("--headless=new")  # Always headless
+            options.add_argument("--headless=new")  # Always headless for performance
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1280,720")
+            options.add_argument("--window-size=800,600")  # Smaller window for memory efficiency
             options.add_argument("--disable-extensions")
-            options.add_argument("--blink-settings=imagesEnabled=false")
-            options.add_argument("--page-load-strategy=eager")
-            options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
+            options.add_argument("--disable-plugins")
+            options.add_argument("--disable-images")
+            options.add_argument("--disable-css-backgrounds")
+            options.add_argument("--disable-background-timer-throttling")
+            options.add_argument("--disable-backgrounding-occluded-windows")
+            options.add_argument("--disable-renderer-backgrounding")
+            options.add_argument("--page-load-strategy=none")  # Don't wait for all resources
+            options.add_argument("--memory-pressure-off")
+            options.add_experimental_option("prefs", {
+                "profile.managed_default_content_settings.images": 2,
+                "profile.default_content_settings.popups": 0,
+                "profile.managed_default_content_settings.media_stream": 2,
+                "profile.managed_default_content_settings.notifications": 2
+            })
             driver = webdriver.Chrome(options=options)
         elif browser_choice == "Firefox":
             options = FirefoxOptions()
@@ -156,28 +167,35 @@ def slot_booking_process(username_input, password_input, day, date, start_time, 
                 options.set_preference("network.proxy.http", proxy.split(":")[0])
                 options.set_preference("network.proxy.http_port", int(proxy.split(":")[1]))
             options.set_preference("permissions.default.image", 2)
-            options.set_preference("dom.ipc.processCount", 8)
+            options.set_preference("dom.ipc.processCount", 4)  # Reduced from 8 for memory efficiency
+            options.set_preference("media.autoplay.enabled", False)
+            options.set_preference("media.navigator.enabled", False)
             driver = webdriver.Firefox(options=options)
         elif browser_choice == "Edge":
             options = EdgeOptions()
             options.add_argument("--headless")
             options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1280,720")
-            options.add_argument("--blink-settings=imagesEnabled=false")
-            options.add_argument("--page-load-strategy=eager")
+            options.add_argument("--window-size=800,600")  # Smaller window
+            options.add_argument("--disable-images")
+            options.add_argument("--disable-css-backgrounds")
+            options.add_argument("--page-load-strategy=none")
             driver = webdriver.Edge(options=options)
         else:
             raise ValueError("Unsupported browser")
 
         active_drivers.append(driver)
         print(f"Running in {browser_choice} headless mode")
-        driver.implicitly_wait(0.2)
+        driver.implicitly_wait(1.0)  # Increased from 0.2 for better reliability
+        driver.set_page_load_timeout(30)  # Prevent hanging on slow connections
 
-        # Login
+        # Login with optimized timing
         root.after(0, lambda: status_label.config(text="Logging in..."))
         driver.get("https://lms2.ai.saveetha.in/course/view.php?id=302")
         try:
-            username_field = WebDriverWait(driver, 3, poll_frequency=0.1).until(EC.presence_of_element_located((By.NAME, 'username')))
+            # Optimized wait times for better performance on limited resources
+            username_field = WebDriverWait(driver, 5, poll_frequency=0.5).until(
+                EC.presence_of_element_located((By.NAME, 'username'))
+            )
             username_field.send_keys(username_input)
             driver.find_element(By.NAME, 'password').send_keys(password_input)
             driver.find_element(By.ID, 'loginbtn').click()
