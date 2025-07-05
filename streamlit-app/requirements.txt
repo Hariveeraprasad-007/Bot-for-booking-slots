@@ -1,4 +1,0 @@
-streamlit==1.45.1
-selenium==4.28.0
-webdriver-manager==4.0.2
-schedule==1.2.2

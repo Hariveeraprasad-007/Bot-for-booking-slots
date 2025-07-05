@@ -1,0 +1,7 @@
+streamlit
+selenium
+webdriver_manager
+schedule
+python-dateutil
+requests
+psutil
